@@ -52,7 +52,7 @@ Notes:
 
 Grab the latest archive from the
 **[Releases page](https://github.com/brighinatommaso-eng/Converter/releases)**:
-`Converter-v0.1.0-windows.zip`.
+`Converter-v0.1.1-windows.zip`.
 
 1. Download and **extract the whole zip** to a folder (don't run it from inside the
    archive). You should see `Converter.exe` next to an `_internal` folder.

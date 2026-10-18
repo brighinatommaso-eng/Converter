@@ -27,18 +27,26 @@ def _asset_path(name: str) -> Path:
     return base / "assets" / name
 
 
-def _load_fonts() -> None:
-    """Carica i font impacchettati in assets/fonts (best-effort).
+def _load_fonts() -> str | None:
+    """Carica i font impacchettati in assets/fonts e ritorna la famiglia realmente
+    registrata da Qt ("Inter"), oppure None se non disponibile.
 
-    Se la cartella o i file mancano (es. rimossi per distribuire senza il font),
-    la GUI ricade sul fallback di sistema definito nel QSS. Non deve mai bloccare
-    l'avvio.
+    Best-effort: se la cartella o i file mancano (es. distribuzione senza il font)
+    ritorna None e la GUI usa il fallback di sistema. Non deve mai bloccare l'avvio.
     """
     fonts_dir = _asset_path("fonts")
     if not fonts_dir.is_dir():
-        return
-    for otf in fonts_dir.glob("*.otf"):
-        QFontDatabase.addApplicationFont(str(otf))
+        return None
+    families: list[str] = []
+    for otf in sorted(fonts_dir.glob("*.otf")):
+        fid = QFontDatabase.addApplicationFont(str(otf))
+        if fid == -1:  # -1: Qt non è riuscito a caricare il file
+            continue
+        families.extend(QFontDatabase.applicationFontFamilies(fid))
+    # La base è "Inter" (esistono anche "Inter Medium"/"Inter SemiBold").
+    exact = [f for f in families if f.lower() == "inter"]
+    prefixed = [f for f in families if f.lower().startswith("inter")]
+    return next(iter(exact or prefixed), None)
 
 
 def _app_icon() -> QIcon:
@@ -90,7 +98,13 @@ def run() -> int:
     # Import dei converter: popola il registry via auto-registrazione.
     from .. import converters  # noqa: F401
 
-    _load_fonts()  # PRIMA di apply_theme: il QSS imposta la famiglia Inter
+    # Carica Inter e impostala come font dell'applicazione: così l'UI non dipende
+    # solo dallo stylesheet. Se Inter non c'è, resta il fallback di sistema.
+    family = _load_fonts()
+    if family:
+        font = app.font()
+        font.setFamily(family)
+        app.setFont(font)
     apply_theme(app)
     window = MainWindow()
     window.setWindowIcon(icon)  # icona anche sulla finestra (title bar)

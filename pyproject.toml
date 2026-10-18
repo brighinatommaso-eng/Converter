@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "Converter"
-version = "0.1.0"
+version = "0.1.1"
 description = "Convert files between formats, 100% locally and offline — honest about quality."
 readme = "README.md"
 requires-python = ">=3.10"

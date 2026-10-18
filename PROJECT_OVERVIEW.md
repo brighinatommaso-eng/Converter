@@ -4,7 +4,7 @@ A complete picture of the app: what it is, how it's built, the principles and co
 the work done so far, the bugs solved, and my (the owner's) working preferences. Written so a
 future session can pick up with full context without re-deriving everything.
 
-- **App:** Converter `0.1.0` — *"Convert files locally — honest about quality."*
+- **App:** Converter `0.1.1` — *"Convert files locally — honest about quality."*
 - **Stack:** Python 3.13 + PySide6 (Qt6), offline desktop app, Windows-first.
 - **Last updated:** 2026-07-04.
 - **Note on authorship:** §§1–13 document how the application is built (reference, derived
