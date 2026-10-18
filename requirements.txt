@@ -1,0 +1,38 @@
+# Converter — dependencies (pip-installable)
+# Install the core set with:  pip install -r requirements.txt
+
+# --- Core (required) ---
+PySide6>=6.6          # GUI (LGPL — distribution-safe Qt binding)
+Pillow>=10.2          # image conversions
+pandas>=2.1           # data / table conversions
+openpyxl>=3.1         # read/write XLSX (used by pandas)
+odfpy>=1.4            # read/write ODS  (used by pandas)
+PyYAML>=6.0           # YAML data conversions
+defusedxml>=0.7       # safe XML parsing (blocks billion-laughs / XXE on untrusted files)
+pdfminer.six>=20221105 # pdf→txt / pdf→html (pure-Python, MIT) — works in Portable
+striprtf>=0.0.26      # rtf→txt (pure-Python, MIT) — works in Portable
+trimesh>=4.0          # 3D mesh conversions (pure-Python, MIT; hard dep numpy comes with pandas)
+
+# --- Optional features (install only if you need them) ---
+# OCR of scanned PDFs (Full mode). ocrmypdf is MPL-2.0 and also needs the external
+# Tesseract + Ghostscript installed on the system:
+#     pip install ocrmypdf>=16.0
+# 3MF import for the 3D category (trimesh reads 3MF only when lxml is present):
+#     pip install lxml>=5
+# HEIC/AVIF image codecs (native deps; decode works, HEIC encode may be limited):
+#     pip install pillow-heif>=0.16
+#     pip install pillow-avif-plugin>=1.4
+# PDF → DOCX/ODT/RTF import. pdf2docx depends on PyMuPDF, which is AGPL-3.0, so it
+# is intentionally kept OUT of the shipped bundle (see THIRD_PARTY_NOTICES.md):
+#     pip install pdf2docx>=0.5.8
+
+# --- Non-pip system tools (NOT installed by pip) ---
+# ffmpeg   : required for ALL audio/video conversions.
+#            Windows : winget install Gyan.FFmpeg
+#            macOS   : brew install ffmpeg
+#            Linux   : sudo apt install ffmpeg   (or dnf/pacman)
+# LibreOffice / pandoc : needed for document conversions (Phase 2).
+
+# --- Development / tests ---
+# pytest>=8.0
+# ruff>=0.6

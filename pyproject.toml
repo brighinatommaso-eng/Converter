@@ -1,0 +1,58 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "Converter"
+version = "0.1.0"
+description = "Convert files between formats, 100% locally and offline — honest about quality."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Tommaso Brighina" }]
+keywords = ["converter", "offline", "images", "audio", "video", "data", "lossless"]
+
+dependencies = [
+    "PySide6>=6.6",
+    "Pillow>=10.2",
+    "pandas>=2.1",
+    "openpyxl>=3.1",
+    "odfpy>=1.4",
+    "PyYAML>=6.0",
+    "defusedxml>=0.7",
+    "pdfminer.six>=20221105",
+    "striprtf>=0.0.26",
+    "trimesh>=4.0",
+]
+
+[project.optional-dependencies]
+# OCR of scanned PDFs — also needs the external Tesseract + Ghostscript installed.
+ocr = ["ocrmypdf>=16.0"]
+# 3MF import for the 3D category (trimesh reads 3MF only with lxml present).
+three-mf = ["lxml>=5"]
+# pdf2docx depends on PyMuPDF (AGPL-3.0): kept optional and OUT of the Windows
+# release bundle for license reasons (see THIRD_PARTY_NOTICES.md).
+pdf-import = ["pdf2docx>=0.5.8"]
+heic = ["pillow-heif>=0.16"]
+avif = ["pillow-avif-plugin>=1.4"]
+test = ["pytest>=8.0"]
+dev = ["ruff>=0.6"]
+
+[project.gui-scripts]
+converter = "converter.gui.app:run"
+
+[tool.setuptools.packages.find]
+include = ["converter*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+# High-signal, low-churn: pyflakes (unused imports / undefined names), import
+# sorting, pyupgrade, bugbear, basic warnings. Intentionally NOT enabling the
+# line-length / whitespace-heavy rules that would fight the hand-aligned style.
+select = ["F", "I", "W", "B", "UP"]
