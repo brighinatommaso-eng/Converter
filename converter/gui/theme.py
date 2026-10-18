@@ -186,8 +186,12 @@ def _stylesheet(p: dict) -> str:
     check = _check_icon(p["accent"])
     arrow = _arrow_icon(p["text_muted"])
     return f"""
+/* Nessuna famiglia di font qui: i widget ereditano il font dell'applicazione,
+   impostato in app.py (QApplication.setFont) e riapplicato da apply_theme DOPO
+   questo stylesheet. Fissare la famiglia nel QSS scavalcava il font globale:
+   ogni widget riceveva un font costruito dal QSS (fallback e hinting diversi da
+   quelli dell'app), proprio la causa della resa incostante. */
 * {{
-    font-family: "Inter", "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
     font-weight: 400;
     font-size: 13px;
     color: {p['text']};
@@ -196,7 +200,7 @@ QWidget {{ background: {p['window']}; }}
 QMainWindow, QDialog {{ background: {p['window']}; }}
 
 QLabel#Subtle {{ color: {p['text_muted']}; background: transparent; }}
-QLabel#Title  {{ font-family: "Inter"; font-weight: 600; font-size: 17px; background: transparent; }}
+QLabel#Title  {{ font-weight: 600; font-size: 17px; background: transparent; }}
 QLabel {{ background: transparent; }}
 
 QMenuBar {{ background: {p['surface']}; border-bottom: 1px solid {p['border']}; }}
@@ -221,11 +225,10 @@ QPushButton#Primary {{
     background: {p['accent']};
     color: {p['accent_text']};
     border: 1px solid {p['accent']};
-    /* Inter è registrata come famiglia unica con facce statiche (Regular 400,
-       Medium 500, SemiBold 600): chiediamo il peso 600 a "Inter" -> match esatto
-       con la faccia SemiBold (glifi veri), invece di riferire un nome-famiglia
-       separato, che su QPushButton (testo disegnato dallo stile) rendeva male. */
-    font-family: "Inter";
+    /* Peso 600 sulla famiglia ereditata ("Inter", registrata con le facce
+       statiche Regular 400 / Medium 500 / SemiBold 600): il match è esatto, si
+       ottengono i glifi veri della SemiBold senza riferire un nome-famiglia
+       separato. La famiglia NON si fissa qui: arriva dal font dell'app. */
     font-weight: 600;
 }}
 QPushButton#Primary:hover {{ background: {p['accent_hover']}; border-color: {p['accent_hover']}; }}
@@ -285,7 +288,6 @@ QHeaderView::section {{
     padding: 6px 10px;
     border: none;
     border-bottom: 1px solid {p['border']};
-    font-family: "Inter";
     font-weight: 500;
 }}
 QTableCornerButton::section {{ background: {p['header']}; border: none; }}
@@ -337,18 +339,29 @@ def apply_theme(app: QApplication, theme: str | None = None) -> None:
     if name not in _PALETTES:
         name = "light"
     _settings().setValue("theme", name)
-    app.setStyle("Fusion")  # base coerente cross-version; il QSS fa il resto
+    # Lo stile si imposta UNA volta: setStyle ricostruisce i font dei widget e il
+    # font globale (Inter) non si ripropaga su chi ha già un font dal QSS.
+    # Cambiare tema DEVE toccare solo lo stylesheet, che non fissa la famiglia.
+    # (setStyleSheet avvolge lo stile in un QStyleSheetStyle senza objectName:
+    # per questo la traccia sta in una proprietà dell'app, non nell'objectName.)
+    if app.property("_converter_base_style") != "fusion":
+        app.setStyle("Fusion")
+        app.setProperty("_converter_base_style", "fusion")
 
+    app.setStyleSheet(_stylesheet(_PALETTES[name]))
+
+    # Il font dell'applicazione va (ri)applicato DOPO setStyle e setStyleSheet:
+    # entrambi ricostruiscono i font dei widget, e il font globale impostato prima
+    # NON si propaga a tutti (menu bar e header ricadono sul default dello stile).
+    # Così ogni widget eredita davvero il font globale, anche al cambio tema.
+    #
     # Hinting: a 13px il font custom, con l'hinting pieno di default, snappa gli
-    # stem alla griglia in modo irregolare -> testo "ballerino" (baseline e spessori
-    # disuguali), evidentissimo sul bianco dei bottoni accentati. PreferNoHinting
-    # rende i glifi lisci e allineati. Si imposta sul font dell'app perché la
-    # preferenza si propaga ai widget anche quando il QSS ne fissa famiglia/peso.
+    # stem alla griglia in modo irregolare -> testo "ballerino" (baseline e
+    # spessori disuguali), evidentissimo sul bianco dei bottoni accentati.
+    # PreferNoHinting rende i glifi lisci e allineati.
     font = app.font()
     font.setHintingPreference(QFont.HintingPreference.PreferNoHinting)
     app.setFont(font)
-
-    app.setStyleSheet(_stylesheet(_PALETTES[name]))
 
 
 def toggle_theme(app: QApplication | None = None) -> str:

@@ -94,7 +94,6 @@ class BadgeDelegate(QStyledItemDelegate):
         painter.fillPath(path, bg)
 
         f: QFont = painter.font()
-        f.setFamily("Inter")
         f.setWeight(QFont.Weight.DemiBold)
         f.setHintingPreference(QFont.PreferNoHinting)
         painter.setFont(f)

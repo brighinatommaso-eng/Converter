@@ -98,8 +98,9 @@ def run() -> int:
     # Import dei converter: popola il registry via auto-registrazione.
     from .. import converters  # noqa: F401
 
-    # Carica Inter e impostala come font dell'applicazione: così l'UI non dipende
-    # solo dallo stylesheet. Se Inter non c'è, resta il fallback di sistema.
+    # Carica Inter e impostala come font dell'applicazione: è la base da cui ogni
+    # widget eredita (apply_theme la riapplica dopo lo stylesheet, che altrimenti
+    # la scavalca). Se Inter non c'è, resta il fallback di sistema.
     family = _load_fonts()
     if family:
         font = app.font()

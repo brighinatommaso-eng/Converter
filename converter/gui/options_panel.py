@@ -67,7 +67,7 @@ class OptionsPanel(QWidget):
         self._target_combo.currentIndexChanged.connect(self._on_target_changed)
         target_row.addWidget(self._target_combo, 1)
         self._badge = QLabel()
-        self._badge.setStyleSheet('font-family: "Inter"; font-weight: 600;')
+        self._badge.setStyleSheet('font-weight: 600;')
         target_row.addWidget(self._badge)
         card_layout.addLayout(target_row)
 
@@ -85,7 +85,7 @@ class OptionsPanel(QWidget):
         # Messaggio di validazione (feedback immediato, prima di convertire).
         self._validation = QLabel()
         self._validation.setWordWrap(True)
-        self._validation.setStyleSheet('color: #C42B1C; font-family: "Inter"; font-weight: 500;')
+        self._validation.setStyleSheet('color: #C42B1C; font-weight: 500;')
         self._validation.hide()
         card_layout.addWidget(self._validation)
 
@@ -310,7 +310,7 @@ class OptionsPanel(QWidget):
         if verdict:
             self._badge.setText(verdict.badge)
             self._badge.setStyleSheet(
-                f'font-family: "Inter"; font-weight: 600; color: {badge_color(verdict.level)};')
+                f'font-weight: 600; color: {badge_color(verdict.level)};')
             self._reason.setText(verdict.reason)
 
         # Stima dimensione di output (best-effort).
