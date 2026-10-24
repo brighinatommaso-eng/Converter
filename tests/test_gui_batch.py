@@ -108,3 +108,53 @@ def test_batch_same_stem_gets_distinct_paths_via_convert_all(tmp_path):
 
     win._cancel_all()
     _app.processEvents()
+
+
+def test_unwritable_output_folder_fails_the_row_without_wedging(tmp_path):
+    """Una cartella di output non scrivibile non deve sollevare dal click né
+    lasciare il batch appeso (Convert disabilitato per sempre): la riga fallisce
+    con un messaggio chiaro e la UI torna utilizzabile."""
+    png = tmp_path / "a.png"
+    Image.new("RGB", (8, 8), (1, 2, 3)).save(png)
+    blocked = tmp_path / "blocked"      # un FILE al posto della cartella
+    blocked.write_text("not a directory", encoding="utf-8")
+
+    win = MainWindow()
+    win.output_dir = blocked
+    win.same_as_source = False
+    win._add_paths([png])               # default: png → bmp (lossless, niente dialog)
+
+    win._convert_all()                  # non deve sollevare
+
+    item = win.model.items[0]
+    assert item.status == "Failed"
+    assert "Could not prepare" in item.error
+    assert win.convert_btn.isEnabled()
+    assert not win.cancel_btn.isEnabled()
+    assert win.clear_btn.isEnabled()
+
+
+def test_changing_target_rearms_a_completed_row(tmp_path):
+    """Dopo una conversione la riga è "Done": cambiare target/opzioni è un nuovo
+    lavoro e deve tornare convertibile, altrimenti "Convert checked" la ignora
+    in silenzio (convertible esclude Done)."""
+    png = tmp_path / "a.png"
+    Image.new("RGB", (8, 8), (1, 2, 3)).save(png)
+
+    win = MainWindow()
+    win._add_paths([png])
+    win.table.selectRow(0)
+    item = win.model.items[0]
+    item.status = "Done"
+    item.out_size = 123
+    item.output_path = tmp_path / "old.bmp"
+    assert win.model.items_to_convert() == []
+
+    idx = win.options._target_combo.findData("jpg")
+    assert idx >= 0
+    win.options._target_combo.setCurrentIndex(idx)  # emette changed
+
+    assert item.dst_format == "jpg"
+    assert item.status == "Ready"
+    assert item.out_size is None and item.output_path is None
+    assert win.model.items_to_convert() == [item]

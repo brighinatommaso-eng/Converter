@@ -23,7 +23,7 @@ Converter — an offline desktop app (PySide6) that converts files between forma
 
 - Run: `python -m pytest -q` (config in `pyproject.toml`, `testpaths=["tests"]`).
 - GUI tests set `QT_QPA_PLATFORM=offscreen` — keep that when adding GUI tests, or they need a display.
-- Audio/video tests `skipif` ffmpeg/ffprobe absent; document tests `skipif` LibreOffice absent; one pdf-import test `skipif` the OCR chain (ocrmypdf+Ghostscript+Tesseract) absent; `test_mesh3d.py` `importorskip`s trimesh. A passing run may be skipping these — check the skip count. (Full run in a complete dev env: **236 passed, 0 skipped**, measured 2026-07-04.)
+- Audio/video tests `skipif` ffmpeg/ffprobe absent; document tests `skipif` LibreOffice absent; one pdf-import test `skipif` the OCR chain (ocrmypdf+Ghostscript+Tesseract) absent; `test_mesh3d.py` `importorskip`s trimesh. A passing run may be skipping these — check the skip count. (Full run in a complete dev env: **246 passed, 0 skipped**, measured 2026-10-24.)
 - To verify GUI visuals truthfully (icons, focus rings, real fonts), render on the **native** Qt platform, not offscreen (offscreen lacks window activation and font glyphs).
 
 ## Linting
@@ -51,5 +51,6 @@ Spawn **every external tool** (soffice, ffmpeg, ffprobe, ocrmypdf) with `deps.cl
 ## Conventions
 
 - Code comments are written in **Italian** (match the surrounding style when editing).
-- Not a git repository.
+- Git repository (`main`); public repo and releases live at
+  https://github.com/brighinatommaso-eng/Converter.
 - `gui/theme.py` QSS font-family names must match the loaded font family **exactly** — a mismatch silently falls back to Segoe UI instead of erroring.

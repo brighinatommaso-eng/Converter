@@ -109,7 +109,16 @@ def find_ffprobe() -> str | None:
 
 @cache
 def find_soffice() -> str | None:
-    extra = [r / "LibreOffice" / "program" for r in _windows_common()]
+    extra: list[Path] = []
+    system = platform.system()
+    if system == "Windows":
+        extra += [r / "LibreOffice" / "program" for r in _windows_common()]
+    elif system == "Darwin":
+        # Il binario dentro il .app non è su PATH (README: l'app gira da sorgente
+        # anche su macOS). _windows_common() NON va usata qui: senza la guardia
+        # restituirebbe i default Windows anche su macOS.
+        extra += [Path("/Applications/LibreOffice.app/Contents/MacOS"),
+                  Path.home() / "Applications/LibreOffice.app/Contents/MacOS"]
     return _locate("soffice", extra)
 
 
@@ -227,16 +236,16 @@ def report() -> dict[str, DependencyStatus]:
     items["FFmpeg (audio/video)"] = ffmpeg_status()
 
     if find_soffice():
-        items["LibreOffice (documents, Phase 2)"] = DependencyStatus(True)
+        items["LibreOffice (documents)"] = DependencyStatus(True)
     else:
-        items["LibreOffice (documents, Phase 2)"] = DependencyStatus(
+        items["LibreOffice (documents)"] = DependencyStatus(
             False, "LibreOffice was not found.", libreoffice_install_hint()
         )
 
     if find_pandoc():
-        items["Pandoc (documents, Phase 2)"] = DependencyStatus(True)
+        items["Pandoc (documents)"] = DependencyStatus(True)
     else:
-        items["Pandoc (documents, Phase 2)"] = DependencyStatus(
+        items["Pandoc (documents)"] = DependencyStatus(
             False, "Pandoc was not found.", pandoc_install_hint()
         )
 

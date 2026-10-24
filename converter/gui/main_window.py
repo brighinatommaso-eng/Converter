@@ -392,6 +392,14 @@ class MainWindow(QMainWindow):
     def _on_options_changed(self) -> None:
         row = self.table.currentIndex().row()
         if row >= 0:
+            item = self.model.items[row]
+            # Nuove impostazioni su una riga già convertita = nuovo lavoro. Senza
+            # questo reset `items_to_convert` la escluderebbe (convertible esclude
+            # "Done") e "Convert checked" ignorerebbe in silenzio la modifica.
+            if item.status == "Done":
+                item.status = "Ready"
+                item.out_size = None
+                item.output_path = None
             self.model.row_changed(row)
         self._reset_progress_if_idle()
 
@@ -605,11 +613,26 @@ class MainWindow(QMainWindow):
         self.status.setText(f"Converting {self._total} file(s){skip_note}…")
 
         reserved: set[Path] = set()  # path già assegnati in QUESTO batch (non ancora su disco)
+        started = 0
         for it in items:
-            row = self.model.items.index(it)
-            output_path = build_output_path(
-                it.src_path, it.dst_format, self.output_dir, self.same_as_source, reserved)
+            # Identità, non uguaglianza: due righe con gli stessi valori non devono
+            # far finire i segnali della seconda sulla prima (items.index usa __eq__).
+            row = next(i for i, candidate in enumerate(self.model.items) if candidate is it)
+            try:
+                output_path = build_output_path(
+                    it.src_path, it.dst_format, self.output_dir, self.same_as_source, reserved)
+            except OSError as exc:
+                # Cartella di output non scrivibile (permessi, disco/USB rimosso):
+                # una riga fallita non deve sollevare dal click e lasciare il batch
+                # a metà, con Convert disabilitato per sempre.
+                it.status = "Failed"
+                it.error = f"Could not prepare the output file: {exc}"
+                self.model.row_changed(row)
+                self._fractions[row] = 1.0
+                self._completed += 1
+                continue
             reserved.add(output_path)
+            started += 1
             it.output_path = output_path
             it.status = "Converting"
             it.progress = 0.0
@@ -625,6 +648,11 @@ class MainWindow(QMainWindow):
                 cancel=it.cancel,
             )
             self.pool.start(ConvertRunnable(row, job, self.signals))
+
+        # Nessun job avviato (tutte le righe sono fallite in preparazione): il
+        # batch è già concluso, la UI va sbloccata subito.
+        if not started and self._completed >= self._total:
+            self._finish_batch()
 
     def _on_progress(self, row: int, fraction: float) -> None:
         if 0 <= row < len(self.model.items):

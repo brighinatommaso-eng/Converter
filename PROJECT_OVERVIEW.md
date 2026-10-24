@@ -150,7 +150,7 @@ Theme preference is stored via `QSettings("Converter","Converter")`.
 ## 9. Testing
 
 - Run: `python -m pytest -q` (config in `pyproject.toml`, `testpaths=["tests"]`).
-- **Current status: 236 collected, 236 passing** (measured 2026-07-04 in a dev
+- **Current status: 246 collected, 246 passing** (measured 2026-10-24 in a dev
   environment with ffmpeg, LibreOffice, pandoc, pdf2docx, trimesh, and the OCR chain
   present; 0 skipped in that environment).
 - GUI tests set `QT_QPA_PLATFORM=offscreen` (keep that for new GUI tests, or they need a
@@ -323,7 +323,7 @@ real Windows Qt run, not offscreen.")
 
 - Redesigned GUI integrated; the review-pass fixes of §22 applied; the same-format data
   fix + two minor GUI fixes of §23 applied; the 3D-model converter of §24 added;
-  **236 tests passing** (measured 2026-07-04, 0 skipped in an environment with all
+  **246 tests passing** (measured 2026-10-24, 0 skipped in an environment with all
   external tools present, trimesh included).
 - Exe rebuilt (`dist/Converter/Converter.exe`, 2026-07-04, incl. the PDF import, the 3D
   converter, the `--convert` and `--pdf2docx` flags, and the §22–24 changes); from the
@@ -622,3 +622,28 @@ in-process like `image.py`, so it works in both Full and Portable — no externa
   the 3mf/lxml gate (mocked, not uninstalled), and content detection of glb/ply/stl/gltf.
 - **Docs:** `README.md` gained a `### 3D models (trimesh)` matrix section and the Status line
   now lists 3D models; `requirements.txt` gained `trimesh` with a note that lxml enables 3mf.
+
+## 25. Release-preparation pass (2026-10-24)
+
+- **`mesh3d.py`: same-format conversions were not a copy.** `verdict("stl","stl")` said
+  LOSSLESS "geometry is copied unchanged", but `convert()` always re-exported through
+  trimesh — and a multi-object OBJ became one flattened mesh. `src == dst` now does a
+  byte-for-byte `shutil.copy`, like `document.py`/`data.py`; regression test asserts the
+  output bytes equal the source bytes.
+- **Config files with valid-but-wrong-shape JSON crashed the GUI.** `PresetStore.load()`
+  runs while `MainWindow` is built, so `presets.json` containing `[]` (or `"presets": 42`)
+  raised `AttributeError` at startup; `history.json` had the same hole on opening History.
+  Both now require a dict with a list under `presets`/`entries`, skipping non-dict items.
+- **GUI: an unwritable output folder raised from the Convert click and wedged the batch**
+  (exception mid-planning left the remaining rows "Converting", Convert disabled forever).
+  `_convert_all` now catches `OSError` per row, marks it Failed with a clear message, counts
+  it as completed; if no job started, the batch closes immediately. Row lookup is by
+  identity instead of `list.index` (`__eq__` could route signals to the wrong row).
+- **GUI: changing target/options on a `Done` row did nothing.** `items_to_convert()`
+  excludes `Done`, so the edit was silently skipped; `_on_options_changed` now resets the
+  row to `Ready` (clearing `out_size`/`output_path`).
+- **`deps.find_soffice()`: macOS LibreOffice was undetectable** (the `.app` binary is not on
+  PATH). Added `/Applications/...` and `~/Applications/...`; the Windows common dirs are now
+  only consulted on Windows (`_windows_common()` used to leak Windows defaults everywhere).
+- Docs: user-facing dependency labels no longer say "Phase 2"; `docs/screenshot.png` (broken
+  in the README) now exists; test counts updated. Full suite: **246 passed**.

@@ -94,6 +94,17 @@ def test_scene_to_glb_stays_lossless_from_glb(tmp_path):
     assert result.ok and result.verdict.level == "lossless"
 
 
+def test_same_format_is_a_byte_copy(tmp_path):
+    """src==dst dichiara "lossless": deve essere una copia fedele, non un
+    round-trip trimesh che riscrive il file (e appiattisce le scene multi-oggetto)."""
+    src = _box(tmp_path / "in.glb")
+    out = tmp_path / "out.glb"
+    result = run_job(ConversionJob(src_path=src, src_format="glb", dst_format="glb",
+                                   output_path=out, options={}))
+    assert result.ok and result.verdict.level == "lossless"
+    assert out.read_bytes() == src.read_bytes()
+
+
 # --- 5) Gating del 3mf su lxml (mock, non disinstallando) ---
 
 def test_3mf_greyed_when_lxml_absent(monkeypatch):

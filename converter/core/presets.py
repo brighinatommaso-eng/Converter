@@ -51,8 +51,18 @@ class PresetStore:
             data = json.loads(self.path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
             return []  # file corrotto/illeggibile: si riparte da zero, niente crash
+        # Un JSON VALIDO ma della forma sbagliata (lista, numero, "presets" non
+        # lista) non deve far crashare l'avvio: la GUI carica i preset in fase di
+        # costruzione. Stessa disciplina di paths.read_setting.
+        if not isinstance(data, dict):
+            return []
+        entries = data.get("presets")
+        if not isinstance(entries, list):
+            return []
         result: list[Preset] = []
-        for entry in data.get("presets", []):
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
             try:
                 result.append(Preset(
                     name=entry["name"],

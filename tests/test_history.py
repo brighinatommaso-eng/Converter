@@ -59,3 +59,16 @@ def test_corrupt_file_is_ignored(tmp_path):
     path = tmp_path / "h.json"
     path.write_text("not json at all {{{")
     assert HistoryStore(path=path).load() == []
+
+
+def test_valid_json_with_wrong_shape_is_ignored(tmp_path):
+    """JSON valido ma non un oggetto (o "entries" non lista) non deve far
+    crashare l'apertura della cronologia."""
+    path = tmp_path / "h.json"
+    path.write_text('[{"source_path": "a.png"}]')
+    assert HistoryStore(path=path).load() == []
+    path.write_text('{"entries": 42}')
+    assert HistoryStore(path=path).load() == []
+    path.write_text('{"entries": ["not-a-dict", {"source_path": "a.png", '
+                    '"source_format": "png", "dst_format": "jpg"}]}')
+    assert [e.source_path for e in HistoryStore(path=path).load()] == ["a.png"]

@@ -47,6 +47,19 @@ def test_corrupt_file_is_ignored(tmp_path):
     assert PresetStore(path=path).load() == []  # niente crash
 
 
+def test_valid_json_with_wrong_shape_is_ignored(tmp_path):
+    """JSON valido ma non un oggetto (o "presets" non lista) non deve crashare
+    l'avvio: la GUI carica i preset mentre costruisce la finestra."""
+    path = tmp_path / "presets.json"
+    path.write_text('["not", "a", "dict"]')
+    assert PresetStore(path=path).load() == []
+    path.write_text('{"presets": {"name": "X"}}')
+    assert PresetStore(path=path).load() == []
+    path.write_text('{"presets": ["not-a-preset", {"name": "X", "dst_format": "jpg"}]}')
+    loaded = PresetStore(path=path).load()
+    assert [p.name for p in loaded] == ["X"]  # la voce malformata si salta
+
+
 def test_reconcile_drops_unknown_and_fills_defaults():
     # 'bogus' non è nello schema JPG e va scartato; 'quality' valido va tenuto.
     result = reconcile_options("png", "jpg", {"quality": 70, "bogus": 1})

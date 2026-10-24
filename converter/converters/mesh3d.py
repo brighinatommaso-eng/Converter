@@ -13,6 +13,8 @@ singolo.
 
 from __future__ import annotations
 
+import shutil
+
 from ..core.base import Converter
 from ..core.deps import DependencyStatus, has_module
 from ..core.job import ConversionJob, ConversionResult, ProgressCallback, ProgressEvent
@@ -95,6 +97,17 @@ class Mesh3DConverter(Converter):
     # --- Esecuzione ---
 
     def convert(self, job: ConversionJob, progress: ProgressCallback) -> ConversionResult:
+        # Stesso formato: copia byte-a-byte, come document.py e data.py. Il verdetto
+        # src==dst è lossless ("geometry is copied unchanged") e solo la copia lo
+        # rende vero: il round-trip trimesh riscriverebbe il file e appiattirebbe
+        # una scena multi-oggetto di un OBJ verso una mesh singola.
+        if job.src_format == job.dst_format:
+            progress(ProgressEvent(0.5, "Copying…"))
+            shutil.copy(job.src_path, job.output_path)
+            size = job.output_path.stat().st_size
+            return ConversionResult(ok=True, output_path=job.output_path, output_size=size,
+                                    verdict=self.verdict(job.src_format, job.dst_format))
+
         import trimesh
 
         progress(ProgressEvent(0.1, "Reading model…"))

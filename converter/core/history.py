@@ -53,8 +53,17 @@ class HistoryStore:
             data = json.loads(self.path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
             return []  # file corrotto: niente crash, si riparte vuoti
+        # JSON valido ma forma inattesa (lista, "entries" non lista): la cronologia
+        # si apre da un dialog, quindi un crash qui sarebbe a un clic di distanza.
+        if not isinstance(data, dict):
+            return []
+        entries = data.get("entries")
+        if not isinstance(entries, list):
+            return []
         result: list[HistoryEntry] = []
-        for entry in data.get("entries", []):
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
             try:
                 result.append(HistoryEntry(**{k: entry.get(k) for k in _FIELDS if k in entry}))
             except (TypeError, KeyError):
