@@ -170,7 +170,7 @@ def test_portable_conversions_run_with_libreoffice_absent(tmp_path, monkeypatch)
     from converter.core.registry import resolve
     # Ogni coppia è instradata a un motore PURO, mai al DocumentConverter.
     assert resolve("md", "docx").__class__.__name__ == "MarkupConverter"
-    assert resolve("pdf", "txt").__class__.__name__ == "PdfConverter"
+    assert resolve("pdf", "txt").__class__.__name__ == "TextDocConverter"
     assert resolve("rtf", "txt").__class__.__name__ == "RtfTextConverter"
 
     # E le conversioni REALI riescono senza LibreOffice presente.

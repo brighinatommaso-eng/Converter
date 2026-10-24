@@ -9,7 +9,8 @@ openpyxl>=3.1         # read/write XLSX (used by pandas)
 odfpy>=1.4            # read/write ODS  (used by pandas)
 PyYAML>=6.0           # YAML data conversions
 defusedxml>=0.7       # safe XML parsing (blocks billion-laughs / XXE on untrusted files)
-pdfminer.six>=20221105 # pdf→txt / pdf→html (pure-Python, MIT) — works in Portable
+pdfminer.six>=20221105 # PDF layout extraction for the structured document engine (pure-Python, MIT)
+python-docx>=1.1      # read/write DOCX for the structured engine (MIT; lxml comes with it)
 striprtf>=0.0.26      # rtf→txt (pure-Python, MIT) — works in Portable
 trimesh>=4.0          # 3D mesh conversions (pure-Python, MIT; hard dep numpy comes with pandas)
 
@@ -22,9 +23,6 @@ trimesh>=4.0          # 3D mesh conversions (pure-Python, MIT; hard dep numpy co
 # HEIC/AVIF image codecs (native deps; decode works, HEIC encode may be limited):
 #     pip install pillow-heif>=0.16
 #     pip install pillow-avif-plugin>=1.4
-# PDF → DOCX/ODT/RTF import. pdf2docx depends on PyMuPDF, which is AGPL-3.0, so it
-# is intentionally kept OUT of the shipped bundle (see THIRD_PARTY_NOTICES.md):
-#     pip install pdf2docx>=0.5.8
 
 # --- Non-pip system tools (NOT installed by pip) ---
 # ffmpeg   : required for ALL audio/video conversions.

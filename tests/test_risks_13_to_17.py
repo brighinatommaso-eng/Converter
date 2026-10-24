@@ -4,7 +4,7 @@
 14 — image.py: sorgenti multi-frame perdevano tutto tranne il primo, in silenzio.
 15 — image.py: EXIF Orientation né applicata né preservata verso png/bmp.
 16 — deps.find_ghostscript: sort lessicografico delle versioni.
-17 — pdf_import.available(): richiedeva LibreOffice anche per pdf→docx.
+17 — pdf→docx: il gate della dipendenza non deve richiedere LibreOffice.
 """
 
 from pathlib import Path
@@ -47,11 +47,12 @@ def test_pdf_to_docx_resolves_without_soffice(monkeypatch):
     engine.set_mode("FULL")
     monkeypatch.setattr(deps, "has_module", lambda name: True)
     monkeypatch.setattr(deps, "find_soffice", lambda: None)
-    from converter.converters.pdf_import import PdfImportConverter
+    from converter.converters.textdoc import TextDocConverter
 
-    assert isinstance(resolve("pdf", "docx"), PdfImportConverter)  # docx: solo pdf2docx
+    assert isinstance(resolve("pdf", "docx"), TextDocConverter)  # in-process
+    conv = TextDocConverter()
+    assert conv.pair_available("pdf", "docx")[0] is True
     # odt/rtf richiedono soffice → coppia non disponibile (run_job la rifiuterebbe).
-    conv = PdfImportConverter()
     assert conv.pair_available("pdf", "odt")[0] is False
 
 

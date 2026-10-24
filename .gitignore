@@ -16,6 +16,11 @@ dist/
 .ruff_cache/
 graphify-out/
 
+# Local document corpus (real files, possibly sensitive — never commit)
+tests/corpus/local/
+# Baselines contain the extracted text of those documents: also local-only
+tests/corpus/expected/
+
 # Generated artifacts (brag video, local build output)
 brag-output/
 

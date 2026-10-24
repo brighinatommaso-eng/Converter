@@ -65,7 +65,7 @@ def test_pdf_to_docx_is_lossy():
     assert conv is not None
     v = conv.verdict("pdf", "docx")
     assert v.is_lossy
-    assert "approximat" in v.reason.lower() or "reconstruct" in v.reason.lower()
+    assert "inferred" in v.reason.lower() or "geometry" in v.reason.lower()
 
 
 def test_same_format_is_lossless():
@@ -93,28 +93,27 @@ def test_pdf_to_writer_formats_marked_unavailable():
 
 
 def test_targets_for_pdf_writer_targets_available(monkeypatch):
-    """pdf→txt e pdf→html restano su pdfminer; pdf→{docx,odt,rtf} non sono più
-    in grigio in FULL: li copre PdfImportConverter (pdf2docx + LibreOffice)."""
+    """Tutti i target testuali del PDF sono coperti dal motore strutturale
+    (pdfminer + python-docx, in-process): niente grigio in nessuna modalità,
+    tranne odt/rtf che passano da LibreOffice per il secondo salto."""
     monkeypatch.setattr(deps, "find_soffice", lambda: "C:/fake/soffice.exe")
     real_has = deps.has_module
     monkeypatch.setattr(deps, "has_module",
-                        lambda n: True if n == "pdf2docx" else real_has(n))
+                        lambda n: True if n == "docx" else real_has(n))
     targets = {t.dst_format: t for t in targets_for("pdf")}
 
-    assert targets["html"].available is True   # pdfminer
-    assert targets["txt"].available is True     # pdfminer (Fase 2): non più in grigio
-    for dst in ("docx", "odt", "rtf"):
+    for dst in ("html", "txt", "md", "docx", "odt", "rtf"):
         assert targets[dst].available is True, dst
 
 
 def test_run_job_refuses_broken_pdf_to_docx_cleanly(monkeypatch, tmp_path):
-    """pdf→docx ora è instradato su PdfImportConverter; un PDF illeggibile viene
+    """pdf→docx è instradato sul motore strutturale; un PDF illeggibile viene
     rifiutato in validate() con un messaggio chiaro, senza lanciare soffice
     né creare output."""
     monkeypatch.setattr(deps, "find_soffice", lambda: "C:/fake/soffice.exe")
     real_has = deps.has_module
     monkeypatch.setattr(deps, "has_module",
-                        lambda n: True if n == "pdf2docx" else real_has(n))
+                        lambda n: True if n == "docx" else real_has(n))
     src = tmp_path / "a.pdf"
     src.write_bytes(b"%PDF-1.4 fake")
     out = tmp_path / "a.docx"

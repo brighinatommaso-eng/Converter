@@ -45,17 +45,17 @@ datas += collect_data_files("pdfminer")
 # trimesh legge risorse dati (trimesh/resources: schema glTF, template): i loader
 # le aprono a runtime, quindi vanno raccolte come per pdfminer.
 datas += collect_data_files("trimesh")
+# python-docx apre i suoi template (default.docx e i default-*.xml) a runtime:
+# senza questi dati il motore strutturale fallirebbe nell'exe.
+datas += collect_data_files("docx")
 
 hiddenimports = [
     "pillow_heif",      # HEIC (opzionale): incluso solo se installato nel build env
     "pillow_avif",      # AVIF (opzionale)
     "odf",              # odfpy (ODS), import name 'odf'
+    "docx",             # python-docx: lettore/scrittore del motore strutturale
     "striprtf",         # rtf->txt PORTABLE (puro Python, MIT)
     "striprtf.striprtf",
-    # pdf2docx / fitz (PyMuPDF) sono ESCLUSI di proposito: PyMuPDF è AGPL-3.0 e
-    # contaminerebbe il binario distribuito (vedi THIRD_PARTY_NOTICES.md). Senza
-    # pdf2docx l'import PDF DEGRADA: pdf→docx/odt/rtf restano in grigio con un
-    # messaggio chiaro (PdfImportConverter.available()), tutto il resto funziona.
     "ocrmypdf",         # OCR PDF scansionati (Full-only); cintura di sicurezza
     "pikepdf",          # dipendenza ocrmypdf (bundling completo di Ghostscript/OCR
     "img2pdf",          #   verificato al /package finale, fuori scope qui)
@@ -66,8 +66,8 @@ hiddenimports += collect_submodules("pdfminer")
 # trimesh carica i suoi exchange loader (stl/gltf/ply/obj/threemf) in modo LAZY:
 # l'analisi statica non li vede, così l'exe importerebbe trimesh ma fallirebbe ogni
 # conversione 3D con ModuleNotFoundError. collect_submodules li include tutti.
-# lxml (per il 3mf) NON serve qui: arriva già da pdf2docx→python-docx→lxml e da
-# pikepdf, entrambi in hiddenimports — non duplicarlo.
+# lxml (per il 3mf) NON serve qui: arriva già da python-docx e da pikepdf,
+# entrambi in hiddenimports — non duplicarlo.
 hiddenimports += collect_submodules("trimesh")
 
 a = Analysis(
@@ -83,8 +83,6 @@ a = Analysis(
     runtime_hooks=[],
     excludes=[
         "tkinter", "pytest",
-        # AGPL-3.0 (via PyMuPDF): fuori dal bundle per licenza, non per scelta tecnica.
-        "pdf2docx", "fitz", "pymupdf",
         "PySide6.QtQml", "PySide6.QtQuick", "PySide6.Qt3DCore",
         # Pacchetti ML/scientifici pesanti presenti nel site-packages ma NON usati
         # da Converter: senza escluderli PyInstaller li raccoglie (torch da solo

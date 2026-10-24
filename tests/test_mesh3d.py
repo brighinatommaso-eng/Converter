@@ -121,7 +121,7 @@ def test_3mf_greyed_when_lxml_absent(monkeypatch):
 
 
 def test_3mf_available_when_lxml_present():
-    # Precondizione dell'ambiente di test: lxml è presente (transitivo di pdf2docx).
+    # Precondizione dell'ambiente di test: lxml è presente (richiesto da python-docx).
     if not mesh3d._LXML_OK:
         pytest.skip("lxml non installato in questo ambiente")
     ok, _ = mesh3d.Mesh3DConverter().format_available("3mf")

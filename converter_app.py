@@ -110,29 +110,36 @@ def _selftest(out_path: str | None) -> int:
 
     # --- PORTABLE: motori puri/bundlati, NIENTE LibreOffice --------------------
     # Il cuore della modalità Portable: queste conversioni devono riuscire da sole
-    # (pdfminer in-bundle, pandoc in _internal/bin, striprtf in-bundle). Le eseguiamo
-    # in PORTABLE proprio per provare che non passano da LibreOffice.
+    # (pdfminer+python-docx in-bundle, pandoc in _internal/bin, striprtf in-bundle).
+    # Le eseguiamo in PORTABLE proprio per provare che non passano da LibreOffice.
     engine.set_mode("PORTABLE")
     has_pandoc = find_pandoc() is not None
     has_pdfminer = has_module("pdfminer")
+    has_docx = has_module("docx")
     has_striprtf = has_module("striprtf")
 
-    # pdf -> txt / html (pdfminer)
-    if has_pdfminer:
+    # pdf -> txt / md / docx / html (motore strutturale: pdfminer + python-docx)
+    if has_pdfminer and has_docx:
         try:
             pdf = d / "p.pdf"
             make_min_pdf(pdf, "Hello PDF")
             r = run_job(ConversionJob(pdf, "pdf", "txt", d / "p.txt"))
             results["portable pdf->txt"] = (
                 r.ok and "Hello" in (d / "p.txt").read_text(encoding="utf-8"))
+            results["portable pdf->md"] = run_job(
+                ConversionJob(pdf, "pdf", "md", d / "p.md")).ok
+            results["portable pdf->docx"] = run_job(
+                ConversionJob(pdf, "pdf", "docx", d / "p.docx")).ok
             results["portable pdf->html"] = run_job(
                 ConversionJob(pdf, "pdf", "html", d / "p.html")).ok
         except Exception as e:  # noqa: BLE001
             results["portable pdf->txt"] = f"ERR {type(e).__name__}: {e}"
-            results.setdefault("portable pdf->html", results["portable pdf->txt"])
+            for key in ("portable pdf->md", "portable pdf->docx", "portable pdf->html"):
+                results.setdefault(key, results["portable pdf->txt"])
     else:
-        results["portable pdf->txt"] = "SKIP no pdfminer"
-        results["portable pdf->html"] = "SKIP no pdfminer"
+        for key in ("portable pdf->txt", "portable pdf->md", "portable pdf->docx",
+                    "portable pdf->html"):
+            results[key] = "SKIP no pdfminer/python-docx"
 
     # md -> html / docx (pandoc)
     if has_pandoc:
@@ -199,9 +206,9 @@ def _selftest(out_path: str | None) -> int:
                 results["document docx->odt"] = "SKIP no docx produced"
         except Exception as e:  # noqa: BLE001
             results["document docx->odt"] = f"ERR {type(e).__name__}: {e}"
-        # PDF come sorgente: pdf->html funziona; pdf->{docx,odt,rtf} sono
-        # disponibili se pdf2docx è nel bundle (Fase PDF-import), altrimenti
-        # restano greyed come prima.
+        # PDF come sorgente: il motore strutturale (pdfminer + python-docx, MIT)
+        # copre docx/md/txt/html in ENTRAMBE le modalità; odt/rtf aggiungono il
+        # salto LibreOffice, quindi restano greyed in PORTABLE.
         try:
             from converter.core.registry import targets_for
             pdf = d / "a.pdf"
@@ -209,19 +216,14 @@ def _selftest(out_path: str | None) -> int:
                 run_job(ConversionJob(pdf, "pdf", "html", d / "a.html")).ok
                 if pdf.exists() else "SKIP no pdf produced")
             tg = {t.dst_format: t for t in targets_for("pdf")}
-            html_ok = bool(tg.get("html") and tg["html"].available)
-            if has_module("pdf2docx"):
-                writer_ok = all(dst in tg and tg[dst].available
-                                for dst in ("docx", "odt", "rtf"))
-            else:
-                writer_ok = all(dst in tg and not tg[dst].available
-                                for dst in ("docx", "odt", "rtf"))
-            results["pdf writer-targets"] = bool(writer_ok and html_ok)
+            writer_ok = all(dst in tg and tg[dst].available
+                            for dst in ("docx", "md", "txt", "html"))
+            results["pdf struct writer-targets"] = bool(writer_ok)
         except Exception as e:  # noqa: BLE001
-            results["pdf writer-targets"] = f"ERR {type(e).__name__}: {e}"
+            results["pdf struct writer-targets"] = f"ERR {type(e).__name__}: {e}"
     else:
         for k in ("document txt->pdf", "document txt->docx", "document docx->odt",
-                  "document pdf->html", "pdf writer-targets"):
+                  "document pdf->html", "pdf struct writer-targets"):
             results[k] = "SKIP no LibreOffice"
 
     def good(v) -> bool:
@@ -288,26 +290,6 @@ def _convert(args: list[str]) -> int:
     return 0 if r_ok else 1
 
 
-def _pdf2docx(args: list[str]) -> int:
-    """--pdf2docx <src> <dst>: esegue SOLO il salto pdf2docx pdf→docx e basta.
-    È il processo figlio killabile lanciato da pdf_import._pdf_to_docx (timeout
-    duro + kill dell'albero): in-process pdf2docx non è interrompibile."""
-    from pathlib import Path
-
-    from converter.converters.pdf_import import _pdf_to_docx_inprocess
-
-    if len(args) < 2:
-        if sys.stderr:
-            sys.stderr.write("usage: --pdf2docx <src> <dst>\n")
-        return 2
-    ok, err = _pdf_to_docx_inprocess(Path(args[0]), Path(args[1]))
-    if not ok:
-        if sys.stderr:
-            sys.stderr.write(err + "\n")
-        return 1
-    return 0
-
-
 def _arg_after(flag: str) -> str | None:
     i = sys.argv.index(flag)
     return sys.argv[i + 1] if i + 1 < len(sys.argv) else None
@@ -318,8 +300,6 @@ if __name__ == "__main__":
         sys.exit(_dumpenv(_arg_after("--dumpenv")))
     if "--selftest" in sys.argv:
         sys.exit(_selftest(_arg_after("--selftest")))
-    if "--pdf2docx" in sys.argv:
-        sys.exit(_pdf2docx(sys.argv[sys.argv.index("--pdf2docx") + 1:]))
     if "--convert" in sys.argv:
         sys.exit(_convert(sys.argv[sys.argv.index("--convert") + 1:]))
 

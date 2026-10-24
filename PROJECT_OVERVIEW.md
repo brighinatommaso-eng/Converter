@@ -88,9 +88,11 @@ God nodes (most-connected core abstractions): `ConversionJob`, `MainWindow`, `re
 | `video.py` | ffmpeg | MP4/MKV/MOV/… incl. **video→GIF** | re-encode is lossy; advanced options (fps, duration) validated by a pure validator. |
 | `data.py` | pandas (+ openpyxl/odfpy/PyYAML/defusedxml) | csv/tsv/json/xlsx/ods/xml/yaml | row-faithful → lossless; XML parsed safely (defusedxml blocks billion-laughs/XXE). |
 | `document.py` | LibreOffice headless | Office docs (Writer/Calc/…) | FULL mode only; faithful Office conversions; greys out without LibreOffice. |
-| `markup.py` | pandoc (bundled binary) | markup/document interchange | pandoc-driven; `_OFFICE_OVERRIDE_OUT = {md, txt}` — docx/odt→**html** is NOT claimed here anymore (see §19), so it routes to LibreOffice. |
-| `pdf.py` | pdfminer.six (pure-Python, MIT) | pdf→txt / pdf→html | works in Portable (no external tool). |
-| `pdf_import.py` | pdf2docx (+ LibreOffice for odt/rtf; OCRmyPDF for scans) | pdf→docx/odt/rtf | lossy for all three; Full-only; priority 10; scanned PDFs go through OCR when the chain is installed, otherwise `validate()` returns an install message (see §21). |
+| `markup.py` | pandoc (bundled binary) | markup/document interchange | pandoc-driven; `_OFFICE_OVERRIDE_OUT = {md, txt}` mostly covers odt→md/txt (docx→md/txt is claimed by `textdoc.py`, which also acts as fallback if python-docx is absent); docx/odt→**html** is NOT claimed here anymore (see §19), so it routes to LibreOffice. |
+| `pdf.py` | pdfminer.six (pure-Python, MIT) | pdf→txt / pdf→html fallback | works in Portable; priority 10, so the structured engine normally wins those pairs. |
+| `textdoc.py` | pdfminer.six + python-docx (both MIT, in-process) | pdf→docx/odt/rtf/md/txt/html; docx→md/txt | structured IR (`docmodel/`); lossy with target-specific reasons; docx/md/txt/html in both modes, odt/rtf need FULL + soffice. See §21. |
+| `docmodel/` | — | IR + readers (`read_pdf`, `read_docx`) + writers (`write_docx`, `write_markdown`, `write_text`, `write_html`) | the single structure model behind `textdoc.py`; documented seam for optional AI refinement. |
+| `_ocr.py` | OCRmyPDF (external) | scanned-PDF preprocessing | OCR only adds an invisible text layer; the structured reader then runs unchanged. |
 | `rtf.py` | striprtf (pure-Python, MIT) | rtf→txt | works in Portable. |
 | `mesh3d.py` | trimesh (pure-Python, MIT; numpy) | obj/stl/ply/glb/gltf/3mf → obj/stl/ply/glb/gltf | in-process (Portable-friendly); 3mf input-only, gated on optional lxml; glb↔gltf lossless, →stl/obj lossy, multi-object→single-mesh downgraded to lossy at runtime (see §24). |
 | `_ffmpeg.py` | — | shared ffmpeg helpers (progress parse, probe duration, cancellation) | used by audio + video. |
@@ -150,23 +152,24 @@ Theme preference is stored via `QSettings("Converter","Converter")`.
 ## 9. Testing
 
 - Run: `python -m pytest -q` (config in `pyproject.toml`, `testpaths=["tests"]`).
-- **Current status: 246 collected, 246 passing** (measured 2026-10-24 in a dev
-  environment with ffmpeg, LibreOffice, pandoc, pdf2docx, trimesh, and the OCR chain
-  present; 0 skipped in that environment).
+- **Current status in this workspace: 443 collected — 423 passing, 20 xfailed** (measured
+  2026-10-24 with ffmpeg, LibreOffice, pandoc, python-docx and trimesh present). The 20
+  xfails are corrupt/encrypted files in the local real-document corpus (see
+  `tests/corpus/README.md`); the 147 readable corpus documents are regression-locked.
+  Without `tests/corpus/local/`, the corpus test skips and the suite is 275 passed.
 - GUI tests set `QT_QPA_PLATFORM=offscreen` (keep that for new GUI tests, or they need a
   display). GUI tests are behavioral (`test_gui_engine_toggle`, `test_gui_history`,
   `test_gui_options`, `test_gui_batch`) — they don't assert theme/layout, so visual
   changes don't break them.
 - Audio/video tests `skipif` ffmpeg/ffprobe absent; document tests `skipif` LibreOffice
-  absent; some pdf-import tests `skipif` the OCR chain (ocrmypdf+Ghostscript+Tesseract)
-  or `pdf2docx` absent; `test_mesh3d.py` `importorskip`s trimesh — a green run may be
-  skipping these, so check the skip count.
+  absent; `test_mesh3d.py` `importorskip`s trimesh — a green run may be skipping these,
+  so check the skip count.
 - Test files span detection, quality, registry resolution (`test_registry_resolve.py`),
   each converter, engine/modes, presets, history, settings, validation, bootstrap, the
   Phase 2/3 matrices, output-path collision (`test_naming.py`), the batch GUI
   (`test_gui_batch.py`), the risk-9–12 fixes (`test_robustness_risks.py`), the
-  risk-13–17 fixes (`test_risks_13_to_17.py`), and the PDF import
-  (`test_pdf_import.py`).
+  risk-13–17 fixes (`test_risks_13_to_17.py`), and the structured document engine
+  (`test_textdoc.py`).
 
 ---
 
@@ -176,16 +179,17 @@ Theme preference is stored via `QSettings("Converter","Converter")`.
 - Output: `dist/Converter/Converter.exe` (~26.8 MB, 28,139,722 bytes on the 2026-07-04
   post-mesh3d build) + `_internal/` containing `assets/fonts/*.otf`, `assets/converter.ico`,
   `assets/*.png`, and `bin/{ffmpeg,ffprobe,pandoc}.exe`.
-- Bundle total ≈1.07 GB (`du -sh dist/Converter` → 1.1 GB on the 2026-07-04 build;
-  previously ~700 MB before the PDF-import dependencies). Breakdown of the largest
-  parts: `bin/` (ffmpeg+ffprobe+pandoc) 655 MB, cv2 111 MB, PySide6 92 MB, pymupdf 38 MB
-  — cv2/pymupdf/pikepdf/lxml enter via pdf2docx (see §21). `_internal/torch` must not
-  exist (tripwire).
-- `hiddenimports` includes `pdf2docx`, `fitz`, `ocrmypdf`, `pikepdf`, `img2pdf` (added
-  with the PDF import work), plus `collect_submodules("trimesh")` and
-  `collect_data_files("trimesh")` (added with the 3D-model work — trimesh lazy-imports
-  its exchange loaders and ships `resources/` schema/templates; see §24). `lxml` (for
-  3mf) is not added explicitly — it already arrives via pdf2docx→python-docx and pikepdf.
+- Bundle total was ≈1.07 GB with the old pdf2docx tree (`du -sh dist/Converter` → 1.1 GB
+  on the 2026-07-04 build). The largest parts remain `bin/` (ffmpeg+ffprobe+pandoc)
+  655 MB and PySide6; dropping pdf2docx removes cv2 (111 MB) and pymupdf (38 MB), so a
+  rebuild should be smaller. `_internal/torch` must not exist (tripwire).
+- `hiddenimports` includes `docx` (structured document engine), `ocrmypdf`, `pikepdf`,
+  `img2pdf`, plus `collect_submodules("trimesh")` and `collect_data_files("trimesh")`
+  (added with the 3D-model work — trimesh lazy-imports its exchange loaders and ships
+  `resources/` schema/templates; see §24). `datas` also collects `pdfminer` resources and
+  `collect_data_files("docx")` (`default.docx` / default-*.xml are opened at runtime).
+  pdf2docx/PyMuPDF are no longer dependencies at all (§21); `lxml` (for 3mf) arrives via
+  python-docx and pikepdf.
 - Entry point is **`converter_app.py`** (absolute import). Do **not** point PyInstaller at
   `converter/__main__.py` — its relative imports have no package context when frozen and Qt
   silently drops from the bundle.
@@ -322,14 +326,16 @@ real Windows Qt run, not offscreen.")
 ## 18. Current state & open items
 
 - Redesigned GUI integrated; the review-pass fixes of §22 applied; the same-format data
-  fix + two minor GUI fixes of §23 applied; the 3D-model converter of §24 added;
-  **246 tests passing** (measured 2026-10-24, 0 skipped in an environment with all
-  external tools present, trimesh included).
-- Exe rebuilt (`dist/Converter/Converter.exe`, 2026-07-04, incl. the PDF import, the 3D
-  converter, the `--convert` and `--pdf2docx` flags, and the §22–24 changes); from the
-  exe: pdf→docx and pdf→odt via `--convert` returned `ok=True` with the expected text;
-  `--selftest` reports PASS 15/15; stl→glb and 3mf→stl via `--convert` returned `ok=True`
-  with re-loadable output (8 and 650 vertices).
+  fix + two minor GUI fixes of §23 applied; the 3D-model converter of §24 added; the
+  structured document engine of §21 replaced the pdf2docx import; **423 tests passing,
+  20 xfailed** with the local real-document corpus (275 passing without it), measured
+  2026-10-24 in an environment with all external tools present, trimesh included.
+- The shipped exe (`dist/Converter/Converter.exe`) predates §21: it was rebuilt on
+  2026-07-04 with the old pdf2docx import and the `--pdf2docx` flag. A rebuild with
+  `converter.spec` is required to ship the structured engine; after it, verify
+  `--selftest` (`portable pdf->md/docx/txt/html`, `pdf struct writer-targets`) and
+  `--convert` on a real PDF. From the 2026-07-04 exe, pdf→docx/pdf→odt returned
+  `ok=True`; stl→glb and 3mf→stl returned `ok=True` with re-loadable output.
 - **Open item:** `--selftest` does not yet include a model3d case (it covers image/audio/
   video/data/document/portable). Adding one would give the frozen 3D path a permanent
   smoke test; for now it's verified via `--convert`.
@@ -396,89 +402,132 @@ real Windows Qt run, not offscreen.")
 
 ---
 
-## 21. PDF import (2026-07-02/03) — pdf→docx/odt/rtf + OCR branch
+## 21. Structured document engine (2026-10-24) — pdf/docx → every text format
 
-New converter `converters/pdf_import.py` (`PdfImportConverter`): input `pdf`, outputs
-`docx/odt/rtf`, `category="document"`, `priority=10`. Reason for the priority:
-`registry.resolve()` does not consult `pair_available()`, so `DocumentConverter`
-(priority 0) also claims pdf→docx/odt/rtf (while blocking them via `pair_available`);
-priority 10 routes the pairs to `PdfImportConverter`.
+Replaces the former `pdf_import.py` (pdf2docx + PyMuPDF, AGPL) with a
+deterministic, MIT-licensed engine. The trigger was empirical: on a realistic
+two-page PDF (title, numbered headings, a 3×3 table, bullets, page break) the old
+paths gave bad results — pdf→md did not exist at all, pdf→txt flattened the table
+into column order and moved a heading after the cells, pdf→html was an
+absolute-positioned div dump, and pdf→docx produced only `Normal` paragraphs with
+Symbol bullets and split paragraphs. A PDF has no structural text model, so the
+structure has to be **inferred from the page geometry**; an LLM would infer it
+non-reproducibly, not add it. Hence: one intermediate representation (IR) and
+writers per format, with the IR as the documented seam for any future AI
+refinement (`Document in → Document out`, off by default).
 
-**Availability** (`available()`): in PORTABLE → unavailable ("PDF import requires Full
-mode.", no install hint). In FULL → requires the `pdf2docx` module. LibreOffice is
-**not** part of `available()`; the soffice requirement for the odt/rtf second hop lives
-in `pair_available(src, dst)`, which returns unavailable for dst in `{odt, rtf}` when
-`find_soffice()` is None. So pdf→docx is offered/runs without LibreOffice; pdf→odt/rtf
-grey out with a reason when LibreOffice is absent. The OCR chain is not part of either gate.
+**IR (`converters/docmodel/types.py`).** `Document`, `Paragraph` (style
+title/heading/body + level), `ListBlock`/`ListItem`, `Table`/`TableCell`,
+`ImageBlock`, `PageBreak`, `Line`/`Run` (bold, italic, underline, font, size,
+colour). `Paragraph.text` joins lines with dehyphenation. `body_size()` is the
+dominant size used to rank headings.
 
-**Conversion paths** (`convert()`):
-- Text PDFs: pdf→docx via pdf2docx run in a **child process** — `_pdf_to_docx` builds a
-  command (`converter_app --pdf2docx <src> <dst>`; frozen: the exe with the flag, from
-  source: the interpreter on `converter_app.py`) and runs it through
-  `_libreoffice.run_with_timeout` (hard timeout `_PDF2DOCX_TIMEOUT = 300 s`, tree kill,
-  clean env). The child calls `_pdf_to_docx_inprocess` (the pdf2docx call). If the command
-  cannot be built (`_pdf2docx_command` returns None), `_pdf_to_docx` falls back to
-  `_pdf_to_docx_inprocess`. For odt/rtf the produced docx goes through
-  `_libreoffice.run_convert` (internal chain — `resolve()` does not chain converters on its own).
-- Scanned PDFs: OCRmyPDF as a subprocess (`--skip-text`, `-l eng+ita+fra`, 600 s hard
-  timeout via `_libreoffice.run_with_timeout`, clean env, no console window) produces a
-  PDF with a text layer; the docx is then rebuilt from the extracted text with
-  python-docx (`_ocr_pdf_to_docx`), not with pdf2docx — see the technical fact below.
+**PDF reader (`docmodel/pdfreader.py`, pdfminer.six).** Reads `LTTextLine` +
+`LTLine`/`LTRect` instead of `LTTextBox` (pdfminer groups table cells into boxes
+and mixes the preceding heading into the first cell). Pipeline:
+1. characters → `Line` + `Run`s (style from `fontname`, size, colour);
+2. thin rule segments → connected components → table grid; cells are filled by
+   line position;
+3. borderless tables: rows of words with a stable column grid (numeric 2-column
+   tables with ≥3 rows; 3+ columns only with a `Table N` caption, ≥50 % numeric
+   cells, or a bold short header over dense rows) — conservative on purpose, so
+   two-column prose, infographics, TOC pages and layout boxes stay paragraphs;
+4. reading order via recursive xy-cut: columns left-to-right, then horizontal
+   bands at the widest gap (a full-width title does not mix the columns below
+   it); the same ordering is applied to paragraphs, tables and images;
+5. paragraph merging (line gaps/indent), dehyphenation across line breaks;
+6. heading/title inference by size rank + numbering (`1.`, `2.1`, `Chapter …`);
+7. bullet/number markers grouped into `ListBlock`s with the marker stripped;
+8. repeated header/footer lines removed (top/bottom margin bands);
+9. embedded images extracted through pdfminer's `ImageWriter` into `ImageBlock`.
 
-**Scanned detection**: `validate()` (called by `run_job` before `convert()`) extracts
-text with pdfminer over the first `_SCAN_CHECK_MAX_PAGES = 5` pages
-(`extract_text(str(src), maxpages=5)`); under `_MIN_TEXT_CHARS = 10` non-whitespace
-characters the PDF is treated as scanned. With the OCR chain present (`_ocr_available()`: ocrmypdf exe + Ghostscript +
-Tesseract), validation passes and OCR happens in `convert()`. Without it, validation
-returns a message naming what to install. Text PDFs convert in both cases (the OCR
-branch degrades without disabling the converter).
+**DOCX reader (`docmodel/docxreader.py`).** Maps real Word styles (`Title`,
+`Heading N`, `List Bullet`/`List Number`, tables) to the same IR, so docx→md/txt
+no longer goes through pandoc's grid tables and front-matter titles. Lists are
+resolved from `w:numPr` + `numbering.xml` (ordered vs bullet, level), because most
+real Word lists use `List Paragraph`, not a list style. Horizontally merged cells
+are emitted once instead of once per covered column.
 
-**Technical fact — `ocr-invisible-text-layer`**: OCRmyPDF's default "sandwich" output
-stores the OCR text with alpha=0 (invisible). pdfminer and PyMuPDF extract that text;
-pdf2docx drops it (its own log: "Words count: 0") and returns success with a docx that
-contains no text. This is why the scanned branch rebuilds the docx from extracted text
-instead of calling pdf2docx. Also recorded as the auto-memory `ocr-invisible-text-layer`.
+**Writers (`docmodel/writers.py`).**
+- `write_docx(..., layout=...)`: `structure` (default) emits real Word styles
+  (`Title`, `Heading N`, `List Bullet`), real tables and carried-over font
+  size/name/colour; `visual` anchors every printed line to the page with
+  `w:framePr` (`w:x`/`w:y` in twips), re-attaches list markers and inserts a
+  page break between PDF pages. `page_breaks` toggles the breaks.
+- `write_markdown`: GFM headings, lists, pipe tables, embedded images.
+- `write_text`: reading order, bullet lines, tab-separated table rows.
+- `write_html`: semantic `h1–h6`/`ul`/`ol`/`table` with inline font/colour and
+  data-URI images (no `position:absolute`).
+- odt/rtf have no dedicated writer: the engine writes a docx and runs an
+  **internal** LibreOffice docx→odt/rtf second hop (`run_convert`).
 
-**deps.py additions**: `find_tesseract()` (bin/ → PATH → `C:\Program Files\Tesseract-OCR`),
-`find_ghostscript()` (`gswin64c`; searches `C:\Program Files\gs\gs<ver>\bin` because the
-Ghostscript installer does not add it to PATH — at runtime OCRmyPDF locates Ghostscript
-itself via the Windows registry, which `clean_subprocess_env()` does not affect),
-`find_ocrmypdf()` (pip console script). All three have install hints, entries in
-`deps.report()`, and are cleared by `engine.refresh_deps()`.
+**Converter (`converters/textdoc.py`, `TextDocConverter`, `priority=20`).**
+Claims `pdf → {docx, odt, rtf, md, txt, html}` and `docx → {md, txt}`; every
+other pair stays on its existing engine (LibreOffice for office↔office and
+docx→html, pandoc for markup→office). `pdf.py` (pdfminer flat dump, priority 10)
+remains the fallback for pdf→txt/html if the structured engine is unavailable.
+- **Availability:** in-process pdfminer.six + python-docx, so pdf→docx/md/txt/html
+  work in **both** FULL and PORTABLE. odt/rtf need FULL mode + soffice for the
+  second hop (checked in `pair_available`, not `available`).
+- **Options:** pdf→docx exposes `docx_layout` (`structure` | `visual`) and
+  `page_breaks` (default true).
+- **Verdicts:** always honestly `lossy` with a target-specific reason. Structure
+  mode states that absolutely positioned elements are not reproduced; visual
+  mode states that lines are separate frames and editing/rewrapping will not
+  reflow.
 
-**Verdict**: lossy for all three targets. The reason text states that layout is
-reconstructed and that scanned PDFs become text-only documents.
+**OCR (`converters/_ocr.py`).** The OCR helpers moved out of the deleted
+`pdf_import.py`. OCRmyPDF (`-l eng+ita+fra --skip-text`, 600 s hard timeout via
+`_libreoffice.run_with_timeout`, clean env, no window) only preprocesses a scanned
+PDF; its text layer is invisible (alpha 0) but pdfminer extracts it, so the same
+structured reader handles native and scanned PDFs. Without the OCR chain,
+`validate()` refuses scans with an install message; text PDFs always convert.
 
-**Entry point (`converter_app.py`)**: `--convert <src> <dst_format> <out> [report]`
-flag — one conversion via `run_job`, result written to the report file (the exe is
-windowed; stdout is not visible without a console). `--pdf2docx <src> <dst>` runs the
-single pdf2docx step (`_pdf_to_docx_inprocess`) and is the command the PDF-import child
-process invokes; it exits 0 on success, 1 on failure (error on stderr), 2 on missing
-args. Neither is the Phase 3 CLI (`converter/cli/` remains the stub). The `--selftest`
-check `pdf writer-targets greyed` was replaced by `pdf writer-targets`: expects the pairs
-available when `pdf2docx` is importable, greyed otherwise.
+**Removed:** `converter/converters/pdf_import.py` (`PdfImportConverter`,
+`_pdf_to_docx`, OCR docx rebuild) and the `converter_app.py --pdf2docx` child
+flag. `--selftest` now covers `portable pdf->txt/md/docx/html` and
+`pdf struct writer-targets` (docx/md/txt/html available).
 
-**Dependencies**: `pdf2docx` (pulls PyMuPDF/AGPL, opencv-python-headless, python-docx,
-lxml) and `ocrmypdf` added to `requirements.txt`; `pdf2docx`, `fitz`, `ocrmypdf`,
-`pikepdf`, `img2pdf` added to `hiddenimports` in `converter.spec`. Tesseract,
-Ghostscript and the ocrmypdf console script are install-yourself dependencies (not
-bundled).
+**Dependencies/packaging:** `python-docx>=1.1` is now a direct MIT dependency
+(`pdf-import` extra removed). `converter.spec` collects `docx` data
+(`default.docx` templates) and no longer mentions/excludes pdf2docx/fitz.
+`THIRD_PARTY_NOTICES.md` lists python-docx + lxml and states no AGPL PDF engine
+is used.
 
-**Tests**: 166 → 179 collected. `tests/test_pdf_import.py` (11 test functions, 13
-collected items — one parametrized ×3): routing in FULL, availability per mode and per
-missing dependency (dependency mocked, not the mode), scanned-vs-text `validate()` with
-the OCR chain mocked present/absent, docx rebuild logic, and one test that runs OCRmyPDF
-on a generated image-PDF and checks the rebuilt docx is non-empty (skips without the
-OCR chain). Three pre-existing tests that asserted "pdf→writer greyed" were updated to
-the new routing (`test_document_converter.py` ×2, `test_phase2_matrix.py` ×1).
+**Tests:** `tests/test_textdoc.py` (34 collected) — routing/availability in both
+modes, the OCR validate gate (mocked chain), a broken PDF, pure-IR unit tests,
+reader robustness (positioned words, `w:numPr` lists, comments in the body,
+missing page size/table grid, merged cells), aligned-table detection (numeric
+2-column, caption-gated 3-column, two-column prose rejection, fragment merge),
+xy-cut column order, and end-to-end assertions on a LibreOffice-built rich PDF
+for md/txt/docx structure/visual/html/odt plus docx→md GFM tables.
+`tests/test_corpus.py` is the real-document harness (structure digest vs JSON
+baselines — see `tests/corpus/README.md`): 147 readable documents pass, 20
+corrupt/encrypted files xfail; in `CORPUS_UPDATE=1` mode unreadable files
+without a baseline skip instead of failing. Stale `pdf_import` tests were
+deleted/updated (matrix, document converter, risk 9/17).
+Full suite: **423 passed, 20 xfailed** with the local corpus (275 passed without
+it), 2026-10-24.
 
-**Frozen build (2026-07-03)**: `pyinstaller converter.spec --noconfirm --clean` exit 0;
-`dist/Converter/Converter.exe`; bundle ≈1.07 GB (see §10); no `_internal/torch`; no
-"missing module" build warnings for pdf2docx/fitz/ocrmypdf/pikepdf/img2pdf/cv2/docx.
-Runs from the exe: text PDF → docx (`ok=True`, marker string present in the extracted
-text); scanned 8-page PDF → docx (`ok=True`, 24,076 non-whitespace characters extracted
-from the output; the source has no extractable text, so the text comes from the OCR
-branch); `--selftest` → PASS, 15/15 entries True.
+**Corpus pass (2026-10-24).** 167 real PDF/DOCX files (Unstructured
+`example-docs`, Apache POI `test-data/document`) through the harness. Fixes driven
+by the failures:
+- PDF word spacing: pdfminer puts synthetic spaces in `LTAnno`, not `LTChar`;
+  skipping them glued every word (`LayoutParser:AUnifiedToolkit`).
+- DOCX lists from `w:numPr` + `numbering.xml`: 10 corpus documents now yield
+  `ListBlock` instead of plain paragraphs.
+- DOCX robustness: comment/PI nodes in the body, missing `w:pgSz`/`w:pgMar`,
+  malformed tables without `w:tblGrid`.
+- Merged cells: one `w:tc` per merged cell, not one per covered column (a
+  63-column header was repeated 63 times).
+- Encrypted PDFs: explicit "password-protected" error instead of an empty message.
+
+Known gaps, in priority order: borderless tables with only two rows, or with no
+numbers/caption/bold header, are still missed (e.g. the Korean 2-row table); a
+table placed beside a text column can absorb that column's lines as stray
+cells (`multi-column.pdf`), because row bands are page-wide; rotated margin
+stamps (arXiv) can interleave with body lines; image-only PDFs need the OCR
+chain; DOCX headers/footers and vertical merges are not represented in the IR.
 
 ---
 
@@ -519,7 +568,7 @@ and where. Test count went 179 → 215. Every item has a regression test named i
   `run_ffmpeg`, `markup.py` (pandoc timeout / non-zero exit), and `pdf.py` (pdfminer except).
 - **`converter_app.py`** guards `if sys.stdout:` in `_selftest`/`_dumpenv`; `gen_media`
   passes `env=clean_subprocess_env(), creationflags=CREATE_NO_WINDOW`; `_selftest` removes
-  its temp dir; adds the `--pdf2docx` flag.
+  its temp dir; it added the `--pdf2docx` flag (removed with the structured engine, §21).
 - **`document.py` convert** copies the file (`shutil.copy`) when `src == dst` instead of a
   LibreOffice round-trip.
 - **`image.py` convert** passes `save_all=True` for multi-frame sources to gif/webp/tiff;
@@ -535,9 +584,8 @@ and where. Test count went 179 → 215. Every item has a regression test named i
 against this exe:
 - `--selftest` → `SELFTEST PASS`, 15/15 entries True, exit 0.
 - `--convert doc.pdf docx …` → `ok=True`, output 36765 bytes, marker text present
-  (the child process `Converter.exe --pdf2docx` ran; in frozen mode `_pdf2docx_command`
-  returns the subprocess command with no in-process fallback, so a produced docx implies
-  the child ran and imported pdf2docx).
+  (historical: the child process `Converter.exe --pdf2docx` ran; that path was removed in
+  §21 and replaced by the in-process structured engine).
 - `--convert doc.pdf odt …` → `ok=True`, output 14407 bytes, marker text present (docx→odt
   second hop via `run_convert`).
 - `--convert data.csv xlsx …` → `ok=True`, verdict lossless, cells `A2='01234'`,
@@ -590,7 +638,7 @@ in-process like `image.py`, so it works in both Full and Portable — no externa
   `model3d`, six `Format` entries).
 - **Availability & gating:** `available()` needs the `trimesh` module; `format_available("3mf")`
   greys out when the optional `lxml` is absent (`_LXML_OK = has_module("lxml")`). lxml is
-  normally present (transitive of pdf2docx). Same optional-dep pattern as HEIC/AVIF in `image.py`.
+  normally present (required by python-docx). Same optional-dep pattern as HEIC/AVIF in `image.py`.
 - **Verdicts** (structural; reasons are the exact badge text): same-format lossless;
   glb↔gltf lossless (geometry+materials+scene graph); stl/ply→ply lossless; obj/glb/gltf/3mf→ply
   lossy (textures/materials dropped); anything→stl lossy (triangle-only); anything→obj lossy
@@ -611,7 +659,7 @@ in-process like `image.py`, so it works in both Full and Portable — no externa
 - **Frozen build:** `converter.spec` gained `datas += collect_data_files("trimesh")` and
   `hiddenimports += collect_submodules("trimesh")` (trimesh lazy-imports its exchange loaders,
   which static analysis misses — without this the exe imports trimesh but fails every 3D
-  conversion). lxml not duplicated (rides in via pdf2docx/pikepdf). Rebuilt
+  conversion). lxml not duplicated (arrives via python-docx/pikepdf). Rebuilt
   (`pyinstaller converter.spec --noconfirm --clean`, exit 0); bundle 1.1 GB (trimesh ~300 KB);
   no `_internal/torch`; trimesh+resources+lxml present. **Verified in the frozen exe** via
   `--convert`: stl→glb `ok=True` (re-loads to 8 vertices) and 3mf→stl `ok=True` (re-loads to
@@ -647,3 +695,36 @@ in-process like `image.py`, so it works in both Full and Portable — no externa
   only consulted on Windows (`_windows_common()` used to leak Windows defaults everywhere).
 - Docs: user-facing dependency labels no longer say "Phase 2"; `docs/screenshot.png` (broken
   in the README) now exists; test counts updated. Full suite: **246 passed**.
+
+---
+
+## 26. Structured document engine (2026-10-24) — implementation log
+
+- **Diagnosis (evidence, not intuition).** A realistic two-page PDF was produced by
+  LibreOffice from a python-docx fixture (title, `1. Summary` H1, `2. Figures` H2, a 3×3
+  table, three bullets, page break, appendix). Old results: pdf→md was not offered at all;
+  pdf→txt put the table cells in column order and the `2. Figures` heading after them;
+  pdf→html emitted absolute-positioned divs; pdf→docx had every paragraph as `Normal`,
+  Symbol bullets and split paragraphs.
+- **New engine.** `converters/docmodel/` (IR, PDF reader, DOCX reader, writers) +
+  `converters/textdoc.py` (`TextDocConverter`, priority 20). Removed
+  `converter/converters/pdf_import.py` and the `--pdf2docx` child flag; OCR helpers moved
+  to `converter/converters/_ocr.py`. Full description and routing in §21.
+- **Verified manually on the probe PDF.** md: `# 1. Summary`, `## 2. Figures`, GFM table,
+  three bullets. txt: `Region\tRevenue\tGrowth` in correct reading order. Structure docx:
+  `Title`/`Heading 1`/`Heading 2`, `List Bullet`, real 3×3 table, Calibri 14 pt heading.
+  Visual docx: `w:framePr` x/y on every printed line, page break between pages.
+- **Tests.** New `tests/test_textdoc.py` (24 collected) covers routing/availability in
+  FULL and PORTABLE, the OCR validate gate (mocked chain), a broken PDF, pure-IR units,
+  and end-to-end assertions for md/txt/docx structure/visual/html/odt and docx→md GFM.
+  Deleted `tests/test_pdf_import.py`; updated `test_phase2_matrix.py`,
+  `test_document_converter.py`, `test_risks_13_to_17.py`, `test_robustness_risks.py`
+  (risk 9 now imports `_ocr`), `test_mesh3d.py` comment, `test_phase2_converters.py`
+  (PORTABLE pdf→txt now routes to `TextDocConverter`).
+- **Packaging/licensing.** `python-docx>=1.1` added as a direct MIT dependency;
+  `pdf-import` extra removed; `converter.spec` collects `docx` templates and no longer
+  excludes/cites pdf2docx/fitz; `THIRD_PARTY_NOTICES.md` states no AGPL PDF engine is
+  used. README/CLAUDE.md updated accordingly.
+- **Proof:** `ruff check .` clean; full suite `423 passed, 20 xfailed` with the local
+  corpus (2026-10-24; the xfails are corrupt/encrypted corpus files, not the empty
+  corpus). The Windows exe was **not** rebuilt (see §18).

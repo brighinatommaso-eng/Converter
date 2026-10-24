@@ -9,15 +9,16 @@ fa `import converter.converters` una volta sola all'avvio.
 # documenti via LibreOffice: stessa disciplina (si registra sempre, grigio se assente).
 # motori "puri" (Fase 2), disponibili anche in PORTABLE; priorità alta per vincere
 # le coppie sovrapposte con LibreOffice: pdf (pdfminer), markup (pandoc), rtf (striprtf).
-from . import (  # noqa: F401  (import per side-effect: registrazione)  # noqa: F401,E402  # noqa: F401,E402
+# textdoc è il motore strutturale (IR): pdf→docx/odt/rtf/md/txt/html e docx→md/txt.
+from . import (  # noqa: F401,E402  (import per side-effect: registrazione)
     audio,
     data,
-    document,  # noqa: F401,E402
+    document,
     image,
     markup,
     mesh3d,
     pdf,
-    pdf_import,
     rtf,
+    textdoc,
     video,
 )

@@ -36,7 +36,7 @@ tells you whether the conversion is lossless or lossy.
 | **Audio** (ffmpeg) | any audio | wav, flac, mp3, aac, m4a, ogg, opus |
 | **Video** (ffmpeg) | any video | mp4, mkv, mov, webm, avi, gif |
 | **Data** (pandas) | csv, tsv, json, yaml, xlsx, ods, xml | csv, tsv, json, yaml, xlsx, ods, xml |
-| **Documents** (LibreOffice / pandoc / pdfminer) | pdf, docx, odt, rtf, md, txt, html, epub | docx, odt, rtf, pdf, md, txt, html, epub |
+| **Documents** (structured engine / LibreOffice / pandoc) | pdf, docx, odt, rtf, md, txt, html, epub | docx, odt, rtf, pdf, md, txt, html, epub |
 | **3D models** (trimesh) | obj, stl, ply, glb, gltf, 3mf | obj, stl, ply, glb, gltf |
 
 Notes:
@@ -46,7 +46,9 @@ Notes:
   are dropped); XML conversions are approximate.
 - 3MF is **input-only**; multi-object 3D scenes are merged into a single mesh when
   the target is stl/obj/ply (reported as lossy).
-- Document conversion is best effort, not pixel-faithful.
+- Document conversion is best effort, not pixel-faithful. PDF imports are rebuilt
+  from the page geometry (headings, paragraphs, lists, tables) with pdfminer.six;
+  the DOCX output can keep the editable structure or reproduce the printed layout.
 
 ## Download (Windows)
 
@@ -91,19 +93,17 @@ To install the external tools:
 | Tesseract | `winget install UB-Mannheim.TesseractOCR` | `brew install tesseract` | `sudo apt install tesseract-ocr` |
 | Ghostscript | `winget install ArtifexSoftware.GhostScript` | `brew install ghostscript` | `sudo apt install ghostscript` |
 
-> **PDF → DOCX / ODT / RTF is not included in the release.**
-> It needs the `pdf2docx` package, which depends on **PyMuPDF (AGPL-3.0)**. It is
-> deliberately left out of the bundle so the release stays free of AGPL
-> obligations (see `THIRD_PARTY_NOTICES.md`). If you want it and accept the
-> license, `pip install pdf2docx` and run from source — those targets then light up
-> automatically. PDF → TXT/HTML (via pdfminer) works everywhere.
+> **PDF → DOCX / ODT / RTF / MD / TXT / HTML is rebuilt in-process.**
+> The structured document engine uses **pdfminer.six** and **python-docx** (both
+> MIT), so no AGPL PDF library is required. PDF → DOCX/MD/TXT/HTML works in both
+> modes; ODT and RTF also need LibreOffice for the final docx → odt/rtf step.
 
 ## Run from source
 
 Requires **Python 3.10+**.
 
 ```bash
-pip install -r requirements.txt   # optional: pip install ".[pdf-import]" to add PDF→DOCX
+pip install -r requirements.txt
 python -m converter
 ```
 
@@ -132,6 +132,11 @@ pytest
 
 The suite covers content detection, registry/target logic, the lossless/lossy
 verdict matrix, and end-to-end image/data/document/audio/video/3D conversions.
+
+For real-document regression checks, put PDFs/DOCX in `tests/corpus/local/`
+(gitignored) and follow [`tests/corpus/README.md`](tests/corpus/README.md): the
+harness compares the reconstructed structure (headings, reading order, lists,
+tables) against reviewable JSON baselines.
 
 ## Status
 

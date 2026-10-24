@@ -14,12 +14,12 @@ from converter.core.registry import resolve, targets_for
 
 @pytest.fixture
 def all_engines(monkeypatch):
-    """Finge presenti LibreOffice, pandoc, pdfminer, striprtf e pdf2docx."""
+    """Finge presenti LibreOffice, pandoc, pdfminer, striprtf e python-docx."""
     monkeypatch.setattr(deps, "find_soffice", lambda: r"C:\LibreOffice\program\soffice.exe")
     monkeypatch.setattr(deps, "find_pandoc", lambda: r"C:\pandoc.exe")
     real_has = deps.has_module
     monkeypatch.setattr(deps, "has_module",
-                        lambda n: True if n in ("pdfminer", "striprtf", "pdf2docx") else real_has(n))
+                        lambda n: True if n in ("pdfminer", "striprtf", "docx") else real_has(n))
 
 
 def _targets(src):
@@ -31,24 +31,26 @@ def _engine(src, dst):
     return conv.__class__.__name__ if conv else None
 
 
-# --- PDF (pdfminer, entrambe le modalità) -----------------------------------
+# --- PDF (motore strutturale, entrambe le modalità) ---------------------------
 
 @pytest.mark.parametrize("mode", ["FULL", "PORTABLE"])
-def test_pdf_to_text_html_via_pdfminer(all_engines, mode):
+def test_pdf_to_text_documents_via_structured_engine(all_engines, mode):
     engine.set_mode(mode)
     t = _targets("pdf")
-    assert t["txt"].available is True and t["txt"].verdict.is_lossy
-    assert t["html"].available is True and t["html"].verdict.is_lossy
-    assert _engine("pdf", "txt") == "PdfConverter"
-    assert _engine("pdf", "html") == "PdfConverter"
-    # pdf→docx non è più in grigio in FULL: lo copre PdfImportConverter
-    # (pdf2docx + LibreOffice). In PORTABLE resta greyed con la ragione di modalità.
+    # pdf→md è una coppia NUOVA: prima non esisteva alcun percorso.
+    for dst in ("docx", "md", "txt", "html"):
+        assert t[dst].available is True, dst
+        assert t[dst].verdict.is_lossy
+        assert _engine("pdf", dst) == "TextDocConverter"
+    # odt/rtf: docx intermedio + secondo salto LibreOffice → solo FULL.
     if mode == "FULL":
-        assert t["docx"].available is True
-        assert _engine("pdf", "docx") == "PdfImportConverter"
+        for dst in ("odt", "rtf"):
+            assert t[dst].available is True, dst
+            assert _engine("pdf", dst) == "TextDocConverter"
     else:
-        assert t["docx"].available is False
-        assert "Full mode" in t["docx"].reason_unavailable
+        for dst in ("odt", "rtf"):
+            assert t[dst].available is False, dst
+            assert "Full mode" in t[dst].reason_unavailable
 
 
 # --- Markup md/epub (pandoc, entrambe le modalità) --------------------------
@@ -67,11 +69,11 @@ def test_md_conversions_available_both_modes(all_engines, mode):
 
 # --- Office come sorgente: override solo sui target che sacrificano il layout -
 
-def test_docx_markup_targets_use_pandoc_office_targets_use_libreoffice(all_engines):
+def test_docx_markup_targets_use_structured_engine_office_targets_use_libreoffice(all_engines):
     engine.set_mode("FULL")
     assert _engine("docx", "html") == "DocumentConverter"  # fedeltà colori → LibreOffice
-    assert _engine("docx", "txt") == "MarkupConverter"
-    assert _engine("docx", "md") == "MarkupConverter"
+    assert _engine("docx", "txt") == "TextDocConverter"
+    assert _engine("docx", "md") == "TextDocConverter"
     assert _engine("docx", "odt") == "DocumentConverter"  # fedeltà → LibreOffice
     assert _engine("docx", "pdf") == "DocumentConverter"  # export PDF → LibreOffice
 
@@ -79,10 +81,11 @@ def test_docx_markup_targets_use_pandoc_office_targets_use_libreoffice(all_engin
 def test_docx_office_targets_greyed_in_portable(all_engines):
     engine.set_mode("PORTABLE")
     t = _targets("docx")
-    # md/txt restano disponibili (pandoc); html ora la rivendica solo LibreOffice,
-    # quindi in PORTABLE compare comunque ma in grigio, come odt/pdf.
+    # md/txt restano disponibili (motore strutturale in-process); html ora la
+    # rivendica solo LibreOffice, quindi in PORTABLE compare in grigio, come odt/pdf.
     assert t["html"].available is False and "Full mode" in t["html"].reason_unavailable
     assert t["md"].available is True
+    assert t["txt"].available is True
     assert t["odt"].available is False and "Full mode" in t["odt"].reason_unavailable
     assert t["pdf"].available is False and "Full mode" in t["pdf"].reason_unavailable
 

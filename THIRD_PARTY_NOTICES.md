@@ -21,7 +21,9 @@ differ slightly.
 | odfpy | Apache-2.0 **or** GPL-2.0+ | used here under Apache-2.0 |
 | PyYAML | MIT | YAML |
 | defusedxml | PSFL | safe XML parsing |
-| pdfminer.six | MIT | pdf→txt/html |
+| pdfminer.six | MIT | PDF layout extraction (structured document engine) |
+| python-docx | MIT | DOCX read/write (structured document engine) |
+| lxml | BSD-3-Clause | required by python-docx |
 | striprtf | BSD | rtf→txt |
 | trimesh | MIT | 3D mesh conversions |
 | ocrmypdf | MPL-2.0 | OCR orchestration (only if present at build time) |
@@ -87,11 +89,9 @@ they are **not** redistributed with Converter:
 
 Users install these themselves; each is governed by its own license.
 
-## Deliberately excluded (AGPL)
+## No AGPL PDF engine
 
-**pdf2docx** and its dependency **PyMuPDF (`fitz`), which is AGPL-3.0**, are
-**not** included in the Windows release. They are excluded on purpose so the
-distributed binary stays free of AGPL obligations (see `converter.spec`
-`excludes`). As a result the PDF → DOCX/ODT/RTF conversions are **not available
-in the release**; a user who wants them can install pdf2docx locally
-(`pip install pdf2docx`).
+**pdf2docx** and its dependency **PyMuPDF (`fitz`)** — both AGPL-3.0 — are **not**
+used and **not** included in the Windows release. PDF → DOCX/ODT/RTF/MD/TXT/HTML
+is handled by the structured document engine built on **pdfminer.six (MIT)** and
+**python-docx (MIT)**, so no AGPL component is required.

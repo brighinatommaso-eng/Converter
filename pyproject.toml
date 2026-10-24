@@ -21,6 +21,7 @@ dependencies = [
     "PyYAML>=6.0",
     "defusedxml>=0.7",
     "pdfminer.six>=20221105",
+    "python-docx>=1.1",
     "striprtf>=0.0.26",
     "trimesh>=4.0",
 ]
@@ -30,9 +31,6 @@ dependencies = [
 ocr = ["ocrmypdf>=16.0"]
 # 3MF import for the 3D category (trimesh reads 3MF only with lxml present).
 three-mf = ["lxml>=5"]
-# pdf2docx depends on PyMuPDF (AGPL-3.0): kept optional and OUT of the Windows
-# release bundle for license reasons (see THIRD_PARTY_NOTICES.md).
-pdf-import = ["pdf2docx>=0.5.8"]
 heic = ["pillow-heif>=0.16"]
 avif = ["pillow-avif-plugin>=1.4"]
 test = ["pytest>=8.0"]

@@ -1,6 +1,6 @@
 """Regressioni per i rischi 9-12 di BUGS.md (robustezza e igiene).
 
-9  — pdf_import: il gate scansione legge solo le prime pagine (no estrazione
+9  — _ocr: il gate scansione legge solo le prime pagine (no estrazione
      completa, per giunta doppia).
 10 — _ffmpeg: probe_duration ha un timeout; run_ffmpeg pulisce l'output su
      cancel/errore (vedi anche 11).
@@ -109,7 +109,7 @@ def test_scan_gate_reads_limited_pages(monkeypatch):
     pytest.importorskip("pdfminer")
     import pdfminer.high_level as hl
 
-    import converter.converters.pdf_import as pi
+    import converter.converters._ocr as ocr
 
     captured: dict = {}
 
@@ -118,8 +118,8 @@ def test_scan_gate_reads_limited_pages(monkeypatch):
         return "questo pdf ha del testo reale " * 3
 
     monkeypatch.setattr(hl, "extract_text", fake_extract)
-    assert pi._has_extractable_text(Path("x.pdf")) is True
-    assert captured.get("maxpages") == pi._SCAN_CHECK_MAX_PAGES  # cap applicato
+    assert ocr.has_extractable_text(Path("x.pdf")) is True
+    assert captured.get("maxpages") == ocr.SCAN_CHECK_MAX_PAGES  # cap applicato
 
 
 # --- Rischio 12: _dumpenv/_selftest sopravvivono a sys.stdout None --------------
