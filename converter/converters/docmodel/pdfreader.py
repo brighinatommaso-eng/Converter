@@ -208,6 +208,14 @@ def _line_from_container(container) -> Line | None:
                 words=words)
 
 
+def _is_rotated(container) -> bool:
+    """True se la riga è scritta ruotata (timbro, filigrana): nessun glifo dritto."""
+    from pdfminer.layout import LTChar
+
+    chars = [char for char in container if isinstance(char, LTChar)]
+    return bool(chars) and all(not char.upright for char in chars)
+
+
 def _rule_segment(obj) -> tuple[str, tuple[float, float, float, float]] | None:
     """Riga di griglia orizzontale/verticale da LTLine/LTRect/LTCurve."""
     x0, y0, x1, y1 = obj.bbox
@@ -833,6 +841,13 @@ def _merge_ok(previous: Line, current: Line) -> bool:
         return False
     if current.size and previous.size and abs(current.size - previous.size) > 1.2:
         return False
+    # Un titolo di sezione numerato non assorbe il paragrafo che segue, anche
+    # quando il corpo è solo ~1pt più piccolo ("1 Introduction" 12pt su 10.9pt):
+    # la differenza di corpo è il confine che la soglia dei 1.2pt non vede.
+    previous_text = previous.text.strip()
+    if (current.size and previous.size and previous.size - current.size > 0.8
+            and len(previous_text) <= 80 and _NUMBERED_RE.match(previous_text)):
+        return False
     # Una nuova voce di elenco apre SEMPRE un blocco: il proiettile/numero è il
     # confine che la prossimità verticale non vede (gli item sono a 18pt).
     text = current.text.lstrip()
@@ -897,7 +912,10 @@ def _heading_level(paragraph: Paragraph, body_size: float, size_rank: dict[float
         pass
     elif chapter and len(text) <= 120:
         return 1
-    elif numbered and bold and size >= body_size * 0.98 and len(text) <= 120:
+    elif numbered and len(text) <= 120 and (
+            (bold and size >= body_size * 0.98) or size >= body_size * 1.05):
+        # "1 Introduction" in un corpo appena più grande (non bold) è un titolo:
+        # senza questa fascia la riga si fondeva col paragrafo che segue.
         pass
     else:
         return None
@@ -972,6 +990,7 @@ def _collect_page(layout, image_writer, tmp_dir: str) -> dict:
     from pdfminer.layout import LTFigure, LTImage, LTLine, LTRect, LTTextLine
 
     lines: list[Line] = []
+    rotated: list[Line] = []
     segments: list[tuple[str, tuple[float, float, float, float]]] = []
     images: list[ImageBlock] = []
 
@@ -979,7 +998,7 @@ def _collect_page(layout, image_writer, tmp_dir: str) -> dict:
         if isinstance(node, LTTextLine):
             line = _line_from_container(node)
             if line is not None:
-                lines.append(line)
+                (rotated if _is_rotated(node) else lines).append(line)
             return
         if isinstance(node, LTImage):
             try:
@@ -1005,6 +1024,13 @@ def _collect_page(layout, image_writer, tmp_dir: str) -> dict:
                 walk(child)
 
     walk(layout)
+    # Il testo ruotato (timbri "arXiv:...", filigrane, artefatti fuori pagina) non
+    # fa parte del flusso di lettura: pdfminer lo spezza in un glifo per riga e
+    # quei glifi finivano per fondersi con le righe di corpo (una cifra diventava
+    # un proiettile) o per superare la soglia heading. Si scarta, a meno che la
+    # pagina non sia ruotata per intero: lì è l'unico testo disponibile.
+    if not lines:
+        lines = rotated
     return {"lines": lines, "segments": segments, "images": images,
             "width": layout.width, "height": layout.height}
 

@@ -442,14 +442,26 @@ def test_pdf_keeps_spaces_between_positioned_words(tmp_path):
     assert [block.text for block in document.blocks] == ["Hello world"]
 
 
-def _write_placed_text_pdf(path: Path, items: list[tuple[float, float, str]]) -> None:
-    """PDF minimo con testo posizionato: (x, y, testo) in punti tipografici."""
+def _write_placed_text_pdf(path: Path, items: list[tuple[float, float, str]],
+                           *, rotated: list[tuple[float, float, str]] = (),
+                           rotated_size: float = 14.0) -> None:
+    """PDF minimo con testo posizionato: (x, y, testo) in punti tipografici.
+
+    `rotated` scrive il testo ruotato di 90° (un glifo ogni 10pt verso il basso),
+    come i timbri "arXiv:..." nel margine sinistro dei PDF arXiv.
+    """
     def escape(text: str) -> str:
         return text.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
 
-    content = "BT /F1 10 Tf\n" + "".join(
-        f"1 0 0 1 {x:.1f} {y:.1f} Tm ({escape(text)}) Tj\n" for x, y, text in items) + "ET"
-    _write_positioned_pdf(path, content.encode("latin-1"))
+    parts = ["BT /F1 10 Tf\n"]
+    parts += [f"1 0 0 1 {x:.1f} {y:.1f} Tm ({escape(text)}) Tj\n" for x, y, text in items]
+    parts.append("ET")
+    if rotated:
+        parts.append(f"\nBT /F1 {rotated_size:.1f} Tf\n")
+        parts += [f"0 1 -1 0 {x:.1f} {y - 10.0 * index:.1f} Tm ({escape(char)}) Tj\n"
+                  for x, y, text in rotated for index, char in enumerate(text)]
+        parts.append("ET")
+    _write_positioned_pdf(path, "".join(parts).encode("latin-1"))
 
 
 def test_pdf_aligned_numeric_table_is_detected(tmp_path):
@@ -576,6 +588,64 @@ def test_pdf_merge_fragments_does_not_join_columns_or_mutate_input():
     bullet = Line(runs=[Run(text="●")], x=72, y=680, width=5, height=10)
     text = Line(runs=[Run(text="item text")], x=90, y=680, width=40, height=10)
     assert [line.text for line in _merge_fragments([bullet, text])] == ["● item text"]
+
+
+def test_pdf_rotated_margin_stamp_stays_out_of_the_body(tmp_path):
+    """Il timbro arXiv ruotato non si fonde col corpo né diventa un titolo.
+
+    pdfminer spezza il testo ruotato in un glifo per riga: la cifra sulla stessa
+    base veniva assorbita come proiettile e i glifi più grandi superavano la
+    soglia heading.
+    """
+    from converter.converters.docmodel import read_pdf
+    from converter.converters.docmodel.types import Paragraph
+
+    pdf = tmp_path / "rotated_stamp.pdf"
+    _write_placed_text_pdf(
+        pdf,
+        [(72.0, 700.0, "Body text of the document."),
+         (72.0, 684.0, "A second line of the same paragraph.")],
+        rotated=[(16.0, 700.0, "4arXiv:2004.04906v3")],
+        rotated_size=20.0,
+    )
+
+    document = read_pdf(pdf)
+    paragraphs = [block for block in document.blocks if isinstance(block, Paragraph)]
+    texts = [paragraph.text for paragraph in paragraphs]
+    assert any("Body text of the document." in text for text in texts)
+    assert all("arXiv" not in text for text in texts)
+    assert all(not text.startswith("4") for text in texts)
+    assert all(paragraph.level == 0 for paragraph in paragraphs)
+
+
+def test_pdf_numbered_heading_slightly_larger_than_body_stays_separate(tmp_path):
+    """Un titolo numerato non bold appena più grande non si fonde col paragrafo.
+
+    "1 Introduction" a 11pt su un corpo di 10pt non supera la soglia 1.15× del
+    rilevamento heading e la differenza di 1pt non basta a fermare il merge:
+    senza la regola dedicata la riga diventava l'inizio del paragrafo.
+    """
+    from converter.converters.docmodel import read_pdf
+    from converter.converters.docmodel.types import Paragraph
+
+    pdf = tmp_path / "numbered_heading.pdf"
+    body = ("Open-domain question answering answers factoid questions using a large "
+            "collection of documents and a retriever.")
+    content = (
+        "BT /F1 11 Tf 1 0 0 1 72 700 Tm (1 Introduction) Tj ET\n"
+        f"BT /F1 10 Tf 1 0 0 1 72 684 Tm ({body}) Tj ET\n"
+        "BT /F1 10 Tf 1 0 0 1 72 670 Tm (The second line belongs to the same paragraph.) Tj ET"
+    )
+    _write_positioned_pdf(pdf, content.encode("latin-1"))
+
+    document = read_pdf(pdf)
+    paragraphs = [block for block in document.blocks if isinstance(block, Paragraph)]
+    texts = [paragraph.text for paragraph in paragraphs]
+    assert "1 Introduction" in texts
+    assert any(text.startswith("Open-domain question answering") for text in texts)
+    heading = next(paragraph for paragraph in paragraphs if paragraph.text == "1 Introduction")
+    assert heading.style == "heading"
+    assert heading.level == 1
 
 
 def _set_numbering(paragraph, num_id: int, level: int = 0) -> None:

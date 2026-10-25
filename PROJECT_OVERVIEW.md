@@ -152,11 +152,11 @@ Theme preference is stored via `QSettings("Converter","Converter")`.
 ## 9. Testing
 
 - Run: `python -m pytest -q` (config in `pyproject.toml`, `testpaths=["tests"]`).
-- **Current status in this workspace: 445 collected — 425 passing, 20 xfailed** (measured
+- **Current status in this workspace: 447 collected — 427 passing, 20 xfailed** (measured
   2026-10-25 with ffmpeg, LibreOffice, pandoc, python-docx and trimesh present). The 20
   xfails are corrupt/encrypted files in the local real-document corpus (see
   `tests/corpus/README.md`); the 147 readable corpus documents are regression-locked.
-  Without `tests/corpus/local/`, the corpus test skips and the suite is 277 passed.
+  Without `tests/corpus/local/`, the corpus test skips and the suite is 279 passed.
 - GUI tests set `QT_QPA_PLATFORM=offscreen` (keep that for new GUI tests, or they need a
   display). GUI tests are behavioral (`test_gui_engine_toggle`, `test_gui_history`,
   `test_gui_options`, `test_gui_batch`) — they don't assert theme/layout, so visual
@@ -327,15 +327,13 @@ real Windows Qt run, not offscreen.")
 
 - Redesigned GUI integrated; the review-pass fixes of §22 applied; the same-format data
   fix + two minor GUI fixes of §23 applied; the 3D-model converter of §24 added; the
-  structured document engine of §21 replaced the pdf2docx import; **425 tests passing,
-  20 xfailed** with the local real-document corpus (277 passing without it), measured
+  structured document engine of §21 replaced the pdf2docx import; **427 tests passing,
+  20 xfailed** with the local real-document corpus (279 passing without it), measured
   2026-10-25 in an environment with all external tools present, trimesh included.
-- The shipped exe (`dist/Converter/Converter.exe`) predates §21: it was rebuilt on
-  2026-07-04 with the old pdf2docx import and the `--pdf2docx` flag. A rebuild with
-  `converter.spec` is required to ship the structured engine; after it, verify
-  `--selftest` (`portable pdf->md/docx/txt/html`, `pdf struct writer-targets`) and
-  `--convert` on a real PDF. From the 2026-07-04 exe, pdf→docx/pdf→odt returned
-  `ok=True`; stl→glb and 3mf→stl returned `ok=True` with re-loadable output.
+- The shipped exe (`dist/Converter/Converter.exe`) was rebuilt on 2026-10-25 with
+  `converter.spec` and now runs the structured engine: `--selftest` passes (including
+  `pdf struct writer-targets`) and `--convert` on `multi-column.pdf` produced
+  `ok=True` for docx/md/txt with the expected tables, headings and prose.
 - **Open item:** `--selftest` does not yet include a model3d case (it covers image/audio/
   video/data/document/portable). Adding one would give the frozen 3D path a permanent
   smoke test; for now it's verified via `--convert`.
@@ -506,7 +504,7 @@ baselines — see `tests/corpus/README.md`): 147 readable documents pass, 20
 corrupt/encrypted files xfail; in `CORPUS_UPDATE=1` mode unreadable files
 without a baseline skip instead of failing. Stale `pdf_import` tests were
 deleted/updated (matrix, document converter, risk 9/17).
-Full suite: **425 passed, 20 xfailed** with the local corpus (277 passed without
+Full suite: **427 passed, 20 xfailed** with the local corpus (279 passed without
 it), 2026-10-25.
 
 **Corpus pass (2026-10-24).** 167 real PDF/DOCX files (Unstructured
@@ -526,9 +524,8 @@ Known gaps, in priority order: borderless tables with only two rows, or with no
 numbers/caption/bold header, are still missed (e.g. the Korean 2-row table);
 multi-line table cells (wrapped continuation lines) still split a table into
 fragments, because the continuation line lands outside the row's vertical span;
-rotated margin stamps (arXiv) can interleave with body lines; image-only PDFs need
-the OCR chain; DOCX headers/footers and vertical merges are not represented in the
-IR.
+image-only PDFs need the OCR chain; DOCX headers/footers and vertical merges are
+not represented in the IR.
 
 **Aligned tables beside a text column (2026-10-25).** A table in the right column
 of a two-column page shares its row bands with the prose of the left column. Three
@@ -549,6 +546,20 @@ prose returns to the body; `pdf2image-memory-error-test-400p.pdf` is unchanged a
 from one TOC line that is now a heading instead of a one-row fake table. Two
 regression tests in `test_textdoc.py` cover a table beside a text column and a wide
 gap before a description column.
+
+**Rotated margin text and numbered section headings (2026-10-25).** arXiv papers
+carry a vertical `arXiv:...` stamp in the left margin. pdfminer splits rotated text
+into one glyph per line; those glyphs shared a baseline with body lines, so a digit
+could be absorbed as a bullet and a large glyph (`C`, `X`) passed the heading
+threshold. `_collect_page` now keeps rotated lines (`LTChar.upright` false) apart
+and drops them, unless the whole page is rotated (then they are the only text).
+This also restores `text_left` to the real body margin, which had been 16pt and
+inflated every list level to 5. Separately, a numbered non-bold line slightly
+larger than the body (`1 Introduction`, 11pt on 10pt) is now a heading and no
+longer merges into the following paragraph. Corpus effect: 9 baselines changed,
+all removals of stamp junk; the two DPR papers gained their section headings
+(`1 Introduction` … `8 Conclusion`) and lost the fake `C`/`X` headings. Two
+regression tests in `test_textdoc.py` cover the stamp and the numbered heading.
 
 ---
 
@@ -746,6 +757,6 @@ in-process like `image.py`, so it works in both Full and Portable — no externa
   `pdf-import` extra removed; `converter.spec` collects `docx` templates and no longer
   excludes/cites pdf2docx/fitz; `THIRD_PARTY_NOTICES.md` states no AGPL PDF engine is
   used. README/CLAUDE.md updated accordingly.
-- **Proof:** `ruff check .` clean; full suite `425 passed, 20 xfailed` with the local
+- **Proof:** `ruff check .` clean; full suite `427 passed, 20 xfailed` with the local
   corpus (2026-10-25; the xfails are corrupt/encrypted corpus files, not the empty
-  corpus). The Windows exe was **not** rebuilt (see §18).
+  corpus). The Windows exe was rebuilt on 2026-10-25 (see §18).
