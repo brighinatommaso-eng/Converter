@@ -152,11 +152,11 @@ Theme preference is stored via `QSettings("Converter","Converter")`.
 ## 9. Testing
 
 - Run: `python -m pytest -q` (config in `pyproject.toml`, `testpaths=["tests"]`).
-- **Current status in this workspace: 443 collected — 423 passing, 20 xfailed** (measured
-  2026-10-24 with ffmpeg, LibreOffice, pandoc, python-docx and trimesh present). The 20
+- **Current status in this workspace: 445 collected — 425 passing, 20 xfailed** (measured
+  2026-10-25 with ffmpeg, LibreOffice, pandoc, python-docx and trimesh present). The 20
   xfails are corrupt/encrypted files in the local real-document corpus (see
   `tests/corpus/README.md`); the 147 readable corpus documents are regression-locked.
-  Without `tests/corpus/local/`, the corpus test skips and the suite is 275 passed.
+  Without `tests/corpus/local/`, the corpus test skips and the suite is 277 passed.
 - GUI tests set `QT_QPA_PLATFORM=offscreen` (keep that for new GUI tests, or they need a
   display). GUI tests are behavioral (`test_gui_engine_toggle`, `test_gui_history`,
   `test_gui_options`, `test_gui_batch`) — they don't assert theme/layout, so visual
@@ -327,9 +327,9 @@ real Windows Qt run, not offscreen.")
 
 - Redesigned GUI integrated; the review-pass fixes of §22 applied; the same-format data
   fix + two minor GUI fixes of §23 applied; the 3D-model converter of §24 added; the
-  structured document engine of §21 replaced the pdf2docx import; **423 tests passing,
-  20 xfailed** with the local real-document corpus (275 passing without it), measured
-  2026-10-24 in an environment with all external tools present, trimesh included.
+  structured document engine of §21 replaced the pdf2docx import; **425 tests passing,
+  20 xfailed** with the local real-document corpus (277 passing without it), measured
+  2026-10-25 in an environment with all external tools present, trimesh included.
 - The shipped exe (`dist/Converter/Converter.exe`) predates §21: it was rebuilt on
   2026-07-04 with the old pdf2docx import and the `--pdf2docx` flag. A rebuild with
   `converter.spec` is required to ship the structured engine; after it, verify
@@ -506,8 +506,8 @@ baselines — see `tests/corpus/README.md`): 147 readable documents pass, 20
 corrupt/encrypted files xfail; in `CORPUS_UPDATE=1` mode unreadable files
 without a baseline skip instead of failing. Stale `pdf_import` tests were
 deleted/updated (matrix, document converter, risk 9/17).
-Full suite: **423 passed, 20 xfailed** with the local corpus (275 passed without
-it), 2026-10-24.
+Full suite: **425 passed, 20 xfailed** with the local corpus (277 passed without
+it), 2026-10-25.
 
 **Corpus pass (2026-10-24).** 167 real PDF/DOCX files (Unstructured
 `example-docs`, Apache POI `test-data/document`) through the harness. Fixes driven
@@ -523,11 +523,32 @@ by the failures:
 - Encrypted PDFs: explicit "password-protected" error instead of an empty message.
 
 Known gaps, in priority order: borderless tables with only two rows, or with no
-numbers/caption/bold header, are still missed (e.g. the Korean 2-row table); a
-table placed beside a text column can absorb that column's lines as stray
-cells (`multi-column.pdf`), because row bands are page-wide; rotated margin
-stamps (arXiv) can interleave with body lines; image-only PDFs need the OCR
-chain; DOCX headers/footers and vertical merges are not represented in the IR.
+numbers/caption/bold header, are still missed (e.g. the Korean 2-row table);
+multi-line table cells (wrapped continuation lines) still split a table into
+fragments, because the continuation line lands outside the row's vertical span;
+rotated margin stamps (arXiv) can interleave with body lines; image-only PDFs need
+the OCR chain; DOCX headers/footers and vertical merges are not represented in the
+IR.
+
+**Aligned tables beside a text column (2026-10-25).** A table in the right column
+of a two-column page shares its row bands with the prose of the left column. Three
+changes in `pdfreader.py` keep both intact:
+- `_continues_table` groups rows across an intervening non-candidate band only when
+  that band lies outside the previous row's horizontal span and the two rows share
+  a median font size (±2 pt), so prose and page headings neither break nor join a
+  table.
+- `_split_at_gutters` drops page-column groups that are prose (`_is_prose`: median
+  ≥4 words per cell) and only to the *left* of the table's column run; a wide gap
+  inside a table (letters column, description column) never splits it.
+- A split is used only when the remaining columns still pass the table guards and
+  the page has text beside them (`_has_text_beside`), so a table alone on a page is
+  never cut. Empty rows left by the removed prose are dropped.
+Effect on the corpus: `multi-column.pdf` goes from 7 fragmented tables to 6 complete
+ones (the Dataset table is 6×5, Tables 2/3/4 merge their continuation rows) and its
+prose returns to the body; `pdf2image-memory-error-test-400p.pdf` is unchanged apart
+from one TOC line that is now a heading instead of a one-row fake table. Two
+regression tests in `test_textdoc.py` cover a table beside a text column and a wide
+gap before a description column.
 
 ---
 
@@ -725,6 +746,6 @@ in-process like `image.py`, so it works in both Full and Portable — no externa
   `pdf-import` extra removed; `converter.spec` collects `docx` templates and no longer
   excludes/cites pdf2docx/fitz; `THIRD_PARTY_NOTICES.md` states no AGPL PDF engine is
   used. README/CLAUDE.md updated accordingly.
-- **Proof:** `ruff check .` clean; full suite `423 passed, 20 xfailed` with the local
-  corpus (2026-10-24; the xfails are corrupt/encrypted corpus files, not the empty
+- **Proof:** `ruff check .` clean; full suite `425 passed, 20 xfailed` with the local
+  corpus (2026-10-25; the xfails are corrupt/encrypted corpus files, not the empty
   corpus). The Windows exe was **not** rebuilt (see §18).

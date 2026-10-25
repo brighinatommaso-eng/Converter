@@ -550,14 +550,130 @@ def _merge_sparse_columns(grids: list[list[_Cell | None]],
     return result, [columns[index] for index in order]
 
 
+def _page_gutters(lines: list[Line]) -> list[tuple[float, float]]:
+    """Bande verticali libere su tutta la pagina: separano colonne di testo.
+
+    A differenza dei vuoti interni a una tabella, una gutter di pagina non è
+    attraversata da nessuna riga: è lo stesso segnale che usa `_xy_cut` per
+    leggere prima la colonna sinistra e poi la destra.
+    """
+    spans = sorted((line.x, line.right) for line in lines)
+    if not spans:
+        return []
+    gutters: list[tuple[float, float]] = []
+    reach = spans[0][1]
+    for start, end in spans[1:]:
+        if start - reach >= _COLUMN_GAP:
+            gutters.append((reach, start))
+        reach = max(reach, end)
+    return gutters
+
+
+def _has_text_beside(lines: list[Line], left: float, right: float) -> bool:
+    """True se la pagina ha testo a sinistra o a destra della tabella.
+
+    Serve a distinguere una tabella affiancata a una colonna di prosa da una
+    tabella sola sulla pagina: nel secondo caso un vuoto largo tra le colonne
+    non è una gutter di pagina e non va usato per tagliare.
+    """
+    return any(line.x < left - 2.0 or line.right > right + 2.0 for line in lines)
+
+
+def _is_prose(cells: list[_Cell]) -> bool:
+    """True se le celle sembrano righe di prosa invece che celle di tabella.
+
+    Una colonna di testo accanto a una tabella ha celle lunghe (molte parole);
+    una colonna vera di tabella può essere stretta e avere poche parole anche
+    quando la tabella è larga. Serve a non staccare una colonna legittima solo
+    perché è più stretta delle altre.
+    """
+    if not cells:
+        return False
+    words = sorted(len(cell[3].split()) for cell in cells)
+    return words[len(words) // 2] >= 4
+
+
+def _split_at_gutters(columns: list[float], grids: list[list[_Cell | None]],
+                      gutters: list[tuple[float, float]]
+                      ) -> tuple[list[float], list[list[_Cell | None]]]:
+    """Scarta la colonna di prosa finita nella stessa fascia della tabella.
+
+    Una tabella nella colonna destra condivide le righe con la prosa della
+    colonna sinistra: senza questo taglio la prosa diventa una colonna della
+    tabella (e sparisce dal corpo del documento). Si tagliano solo i gruppi di
+    colonne che sono prosa e stanno a sinistra della tabella: un vuoto largo
+    dentro una tabella (colonna di lettere, colonna stretta, colonna di
+    descrizioni) non deve dividerla a metà.
+    """
+    splits = [index + 1 for index in range(len(columns) - 1)
+              if any(columns[index] <= left and columns[index + 1] >= right
+                     for left, right in gutters)]
+    if not splits:
+        return columns, grids
+    groups: list[tuple[int, int]] = []
+    start = 0
+    for end in splits:
+        groups.append((start, end))
+        start = end
+    groups.append((start, len(columns)))
+    cells = [[cell for grid in grids for cell in grid[low:high] if cell]
+             for low, high in groups]
+    prose = [_is_prose(group) for group in cells]
+    if all(prose) or not any(prose):
+        return columns, grids
+    # La tabella è la sequenza di colonne non-prosa che contiene il gruppo più
+    # pieno; la prosa può stare solo alla sua sinistra (ordine di lettura).
+    best = max((index for index in range(len(groups)) if not prose[index]),
+               key=lambda index: len(cells[index]))
+    low, high = best, best
+    while low > 0 and not prose[low - 1]:
+        low -= 1
+    while high + 1 < len(groups) and not prose[high + 1]:
+        high += 1
+    if any(prose[index] for index in range(high + 1, len(groups))):
+        return columns, grids
+    return (columns[groups[low][0]:groups[high][1]],
+            [grid[groups[low][0]:groups[high][1]] for grid in grids])
+
+
 def _caption_above(lines: list[Line], top: float) -> bool:
     """True se sopra la tabella c'è una didascalia "Table N"."""
     return any(0 <= line.y - top <= 40 and _CAPTION_RE.match(line.text.strip())
                for line in lines)
 
 
+def _median_size(cells: list[_Cell]) -> float:
+    """Corpo mediano delle celle: un marcatore di nota non cambia la riga."""
+    sizes = sorted(cell[5] for cell in cells)
+    return sizes[len(sizes) // 2]
+
+
+def _continues_table(previous: tuple[int, float, list[_Cell], list[Line]],
+                     candidate: tuple[int, float, list[_Cell], list[Line]],
+                     bands: list[list]) -> bool:
+    """True se la riga candidata continua la tabella della riga precedente.
+
+    Tra due righe di tabella può cadere una riga di prosa dell'altra colonna:
+    non è una candidata (una sola cella) e non deve spezzare la tabella. Una
+    banda che resta fuori dalla larghezza della riga precedente non appartiene
+    alla tabella e viene saltata; una didascalia o un'altra tabella, che invece
+    ne occupa la larghezza, interrompe il gruppo. Un titolo sopra la tabella ha
+    un corpo più grande delle righe e non è una riga della tabella.
+    """
+    if abs(_median_size(previous[2]) - _median_size(candidate[2])) > 2.0:
+        return False
+    if candidate[0] == previous[0] + 1:
+        return True
+    left = min(fragment.x for fragment in previous[3])
+    right = max(fragment.right for fragment in previous[3])
+    return all(fragment.right <= left or fragment.x >= right
+               for index in range(previous[0] + 1, candidate[0])
+               for fragment in bands[index][1])
+
+
 def _build_aligned_tables(lines: list[Line], page_height: float,
-                          ruled: list[Table]) -> list[Table]:
+                          ruled: list[Table],
+                          gutters: list[tuple[float, float]]) -> list[Table]:
     """Tabelle ricostruite dagli allineamenti, non dalle linee disegnate.
 
     Molti PDF (LaTeX booktabs, Elsevier, report Word stampati) non disegnano le
@@ -581,7 +697,7 @@ def _build_aligned_tables(lines: list[Line], page_height: float,
 
     groups: list[list[tuple[int, float, list[_Cell], list[Line]]]] = []
     for candidate in candidates:
-        if groups and candidate[0] == groups[-1][-1][0] + 1:
+        if groups and _continues_table(groups[-1][-1], candidate, bands):
             groups[-1].append(candidate)
         else:
             groups.append([candidate])
@@ -606,70 +722,106 @@ def _build_aligned_tables(lines: list[Line], page_height: float,
         cell_rows, columns = _merge_sparse_columns(cell_rows, columns)
         if len(columns) < 2:
             continue
-        if sum(1 for grid in cell_rows if sum(1 for cell in grid if cell) >= 2) < 2:
-            continue
 
-        texts = [cell[3] for grid in cell_rows for cell in grid if cell and cell[3].strip()]
-        if not texts:
-            continue
-        lengths = sorted(len(text) for text in texts)
-        median = lengths[len(lengths) // 2]
-        numeric = sum(1 for text in texts
-                      if _NUMERIC_CELL_RE.match(text) and any(ch.isdigit() for ch in text)) / len(texts)
-        x0 = min(cell[0] for cell in all_cells)
-        x1 = max(cell[1] for cell in all_cells)
-        y0 = min(candidate[1] for candidate in group)
-        y1 = max(candidate[1] + max(cell[6] for cell in candidate[2]) for candidate in group)
-        width, height = x1 - x0, y1 - y0
-        if width < 40 or height < 8:
-            continue
-        if len(columns) == 2:
-            # Due righe di due colonne sono quasi sempre un'intestazione di
-            # pagina (numero + testatina) o due colonne di testo: una tabella
-            # vera a due colonne ha almeno tre righe e celle numeriche.
-            if len(group) < 3 or numeric < 0.6:
-                continue
-            if height > page_height * 0.5:
-                continue
-        else:
-            first_row = [cell for cell in cell_rows[0] if cell and cell[3].strip()]
-            bold_header = bool(first_row) and all(cell[4] for cell in first_row)
-            dense = (sum(1 for grid in cell_rows for cell in grid if cell)
-                     / (len(cell_rows) * len(columns)))
-            if _caption_above(lines, y1) or numeric >= 0.5:
-                pass
-            elif not (bold_header and dense >= 0.6 and median <= 15):
-                # Senza didascalia né numeri serve un'intestazione in grassetto
-                # con celle corte e righe piene; altrimenti sono colonne di
-                # testo (o un'infografica), non una tabella.
-                continue
-        cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
-        if any(table.x - 2 <= cx <= table.x + table.width + 2
-               and table.y - 2 <= cy <= table.y + table.height + 2 for table in ruled):
-            continue
-
-        bounds = [x0] + [(columns[index] + columns[index + 1]) / 2
-                         for index in range(len(columns) - 1)] + [x1]
-        widths = [max(1.0, bounds[index + 1] - bounds[index])
-                  for index in range(len(bounds) - 1)]
-
-        output: list[list[TableCell]] = []
-        for grid in cell_rows:
-            row: list[TableCell] = []
-            for cell in grid:
-                if cell is None or not cell[3].strip():
-                    row.append(TableCell(paragraphs=[]))
-                    continue
-                line = Line(runs=[Run(text=cell[3], bold=cell[4], size=cell[5])],
-                            x=cell[0], y=cell[2], width=cell[1] - cell[0], height=cell[6])
-                row.append(TableCell(paragraphs=[Paragraph(lines=[line])]))
-            output.append(row)
-
-        first_row = [cell for cell in cell_rows[0] if cell and cell[3].strip()]
-        header = 1 if first_row and all(cell[4] for cell in first_row) else 0
-        tables.append(Table(rows=output, widths_pt=widths, borders=False, header_rows=header,
-                            x=x0, y=y0, width=width, height=height))
+        # Il taglio della prosa vale solo se la parte che resta è ancora una
+        # tabella e se accanto c'è davvero una colonna di testo: una tabella
+        # sola sulla pagina non ha prosa da scartare.
+        options: list[tuple[list[float], list[list[_Cell | None]]]] = []
+        split = _split_at_gutters(columns, cell_rows, gutters)
+        if split[0] != columns:
+            kept_cells = [cell for grid in split[1] for cell in grid if cell]
+            if kept_cells and _has_text_beside(lines,
+                                               min(cell[0] for cell in kept_cells),
+                                               max(cell[1] for cell in kept_cells)):
+                options.append(split)
+        options.append((columns, cell_rows))
+        for option_columns, option_rows in options:
+            built = _table_from_group(group, option_columns, option_rows, lines,
+                                      page_height, ruled)
+            if built is not None:
+                tables.append(built)
+                break
     return tables
+
+
+def _table_from_group(group: list[tuple[int, float, list[_Cell], list[Line]]],
+                      columns: list[float], cell_rows: list[list[_Cell | None]],
+                      lines: list[Line], page_height: float,
+                      ruled: list[Table]) -> Table | None:
+    """Costruisce la tabella del gruppo, se colonne e righe superano le guardie."""
+    # Una riga fatta solo di prosa dell'altra colonna resta vuota: non è una
+    # riga della tabella e non deve comparire come riga bianca.
+    kept = [(candidate, grid) for candidate, grid in zip(group, cell_rows, strict=True)
+            if any(grid)]
+    if len(kept) < 2:
+        return None
+    group = [candidate for candidate, _ in kept]
+    cell_rows = [grid for _, grid in kept]
+    if len(columns) < 2:
+        return None
+    if sum(1 for grid in cell_rows if sum(1 for cell in grid if cell) >= 2) < 2:
+        return None
+
+    texts = [cell[3] for grid in cell_rows for cell in grid if cell and cell[3].strip()]
+    if not texts:
+        return None
+    lengths = sorted(len(text) for text in texts)
+    median = lengths[len(lengths) // 2]
+    numeric = sum(1 for text in texts
+                  if _NUMERIC_CELL_RE.match(text) and any(ch.isdigit() for ch in text)) / len(texts)
+    y0 = min(candidate[1] for candidate in group)
+    y1 = max(candidate[1] + max(cell[6] for cell in candidate[2]) for candidate in group)
+    x0 = min(cell[0] for grid in cell_rows for cell in grid if cell)
+    x1 = max(cell[1] for grid in cell_rows for cell in grid if cell)
+    width, height = x1 - x0, y1 - y0
+    if width < 40 or height < 8:
+        return None
+    if len(columns) == 2:
+        # Due righe di due colonne sono quasi sempre un'intestazione di
+        # pagina (numero + testatina) o due colonne di testo: una tabella
+        # vera a due colonne ha almeno tre righe e celle numeriche.
+        if len(group) < 3 or numeric < 0.6:
+            return None
+        if height > page_height * 0.5:
+            return None
+    else:
+        first_row = [cell for cell in cell_rows[0] if cell and cell[3].strip()]
+        bold_header = bool(first_row) and all(cell[4] for cell in first_row)
+        dense = (sum(1 for grid in cell_rows for cell in grid if cell)
+                 / (len(cell_rows) * len(columns)))
+        if _caption_above(lines, y1) or numeric >= 0.5:
+            pass
+        elif not (bold_header and dense >= 0.6 and median <= 15):
+            # Senza didascalia né numeri serve un'intestazione in grassetto
+            # con celle corte e righe piene; altrimenti sono colonne di
+            # testo (o un'infografica), non una tabella.
+            return None
+    cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+    if any(table.x - 2 <= cx <= table.x + table.width + 2
+           and table.y - 2 <= cy <= table.y + table.height + 2 for table in ruled):
+        return None
+
+    bounds = [x0] + [(columns[index] + columns[index + 1]) / 2
+                     for index in range(len(columns) - 1)] + [x1]
+    widths = [max(1.0, bounds[index + 1] - bounds[index])
+              for index in range(len(bounds) - 1)]
+
+    output: list[list[TableCell]] = []
+    for grid in cell_rows:
+        row: list[TableCell] = []
+        for cell in grid:
+            if cell is None or not cell[3].strip():
+                row.append(TableCell(paragraphs=[]))
+                continue
+            line = Line(runs=[Run(text=cell[3], bold=cell[4], size=cell[5])],
+                        x=cell[0], y=cell[2], width=cell[1] - cell[0], height=cell[6])
+            row.append(TableCell(paragraphs=[Paragraph(lines=[line])]))
+        output.append(row)
+
+    first_row = [cell for cell in cell_rows[0] if cell and cell[3].strip()]
+    header = 1 if first_row and all(cell[4] for cell in first_row) else 0
+    return Table(rows=output, widths_pt=widths, borders=False, header_rows=header,
+                 x=x0, y=y0, width=width, height=height)
 
 
 # --- Paragrafi, lista, allineamento ---------------------------------------
@@ -910,7 +1062,7 @@ def _assemble(pages: list[dict], page_width: float, page_height: float) -> Docum
                 tables.append(built[0])
                 table_lines.update(built[1])
 
-        aligned = _build_aligned_tables(page["lines"], page_height, tables)
+        aligned = _build_aligned_tables(page["lines"], page_height, tables, _page_gutters(lines))
         tables.extend(aligned)
 
         free = [line for index, line in enumerate(lines)

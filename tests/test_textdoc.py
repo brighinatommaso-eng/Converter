@@ -513,6 +513,56 @@ def test_pdf_two_columns_of_text_are_not_a_table(tmp_path):
     assert any("left column" in block.text for block in document.blocks)
 
 
+def test_pdf_table_beside_a_text_column_keeps_prose_out_of_the_table(tmp_path):
+    """La prosa della colonna sinistra non deve diventare una colonna della tabella."""
+    from converter.converters.docmodel import read_pdf
+    from converter.converters.docmodel.types import Table
+
+    prose = ["Left column prose line number one",
+             "Left column prose line number two",
+             "Left column prose line number three",
+             "Left column prose line number four"]
+    items: list[tuple[float, float, str]] = []
+    for index, text in enumerate(prose):
+        items.append((72.0, 700.0 - 16 * index, text))
+        items.append((330.0, 700.0 - 16 * index, str(index + 1)))
+        items.append((420.0, 700.0 - 16 * index, str(10 * (index + 1))))
+    pdf = tmp_path / "table_beside_text.pdf"
+    _write_placed_text_pdf(pdf, items)
+
+    document = read_pdf(pdf)
+    tables = [block for block in document.blocks if isinstance(block, Table)]
+    assert len(tables) == 1
+    assert [[cell.paragraphs[0].text for cell in row] for row in tables[0].rows] == [
+        ["1", "10"], ["2", "20"], ["3", "30"], ["4", "40"]]
+    body = [block.text for block in document.blocks if not isinstance(block, Table)]
+    assert any("Left column prose line number one" in text for text in body)
+
+
+def test_pdf_wide_gap_before_a_description_column_keeps_the_column(tmp_path):
+    """Una colonna di descrizioni è una colonna della tabella, non prosa da scartare."""
+    from converter.converters.docmodel import read_pdf
+    from converter.converters.docmodel.types import Table
+
+    rows = [("Line 1", "01-05", "Command Code required for the display"),
+            ("Line 2", "06-15", "Command Definer Code is required"),
+            ("Line 3", "17-20", "Display Source Code is required"),
+            ("Line 4", "21-30", "Name Control of the taxpayer")]
+    items: list[tuple[float, float, str]] = [(72.0, 730.0, "Table 2: Command Code Input")]
+    for index, row in enumerate(rows):
+        items.append((72.0, 700.0 - 16 * index, row[0]))
+        items.append((110.0, 700.0 - 16 * index, row[1]))
+        items.append((300.0, 700.0 - 16 * index, row[2]))
+    pdf = tmp_path / "wide_gap_table.pdf"
+    _write_placed_text_pdf(pdf, items)
+
+    document = read_pdf(pdf)
+    tables = [block for block in document.blocks if isinstance(block, Table)]
+    assert len(tables) == 1
+    assert [[cell.paragraphs[0].text for cell in row] for row in tables[0].rows] == [
+        list(row) for row in rows]
+
+
 def test_pdf_merge_fragments_does_not_join_columns_or_mutate_input():
     """Un vuoto di 12pt tra due colonne non è uno spazio: le righe restano separate."""
     from converter.converters.docmodel.pdfreader import _merge_fragments
