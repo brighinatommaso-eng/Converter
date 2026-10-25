@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Converter — Stardance devlog</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { width: 1600px; height: 900px; overflow: hidden; }
+  body {
+    font-family: "Segoe UI", system-ui, sans-serif;
+    background:
+      radial-gradient(1100px 560px at 6% -12%, rgba(108,124,255,.36), transparent 62%),
+      radial-gradient(900px 520px at 104% 112%, rgba(139,92,246,.22), transparent 62%),
+      linear-gradient(158deg, #0A0F1E 0%, #0E1428 55%, #090E1B 100%);
+    color: #E9EDF7; padding: 40px 56px 34px;
+    display: flex; flex-direction: column; gap: 18px;
+  }
+  header { display: flex; align-items: center; gap: 14px; }
+  .logo { width: 46px; height: 46px; border-radius: 13px; box-shadow: 0 10px 26px rgba(108,124,255,.38); }
+  .brand { font-size: 26px; font-weight: 650; letter-spacing: -.4px; }
+  .sub { font-size: 14px; color: #93A0BE; }
+  .spacer { flex: 1; }
+  .pill {
+    font-family: "Cascadia Mono", Consolas, monospace; font-size: 12.5px; color: #C9D2F0;
+    background: rgba(255,255,255,.06); border: 1px solid rgba(255,255,255,.13);
+    padding: 8px 13px; border-radius: 10px;
+  }
+  .pill b { color: #fff; font-weight: 600; }
+
+  .headline h1 { font-size: 36px; line-height: 1.12; letter-spacing: -.9px; font-weight: 700; }
+  .headline h1 em { font-style: normal; color: #93A3FF; }
+  .headline p { margin-top: 5px; font-size: 15px; color: #97A2C0; }
+
+  .window {
+    border-radius: 13px; overflow: hidden; border: 1px solid rgba(255,255,255,.12);
+    box-shadow: 0 26px 70px rgba(0,0,0,.45); background: #1E1E1E;
+  }
+  .titlebar {
+    height: 34px; background: #232323; border-bottom: 1px solid #2C2C2C;
+    display: flex; align-items: center; gap: 9px; padding: 0 12px;
+    font-size: 12px; color: #B9B9B9;
+  }
+  .titlebar img { width: 17px; height: 17px; border-radius: 5px; }
+  .dots { margin-left: auto; display: flex; gap: 7px; }
+  .dots i { width: 10px; height: 10px; border-radius: 50%; display: block; }
+  .shot { display: block; width: 100%; }
+
+  .metrics { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; }
+  .metric {
+    background: rgba(255,255,255,.05); border: 1px solid rgba(255,255,255,.10);
+    border-radius: 14px; padding: 14px 16px;
+  }
+  .metric .num { font-size: 26px; font-weight: 700; letter-spacing: -.5px; color: #93A3FF; }
+  .metric .num.ok { color: #6EE7C7; }
+  .metric .lab { margin-top: 3px; font-size: 12.5px; line-height: 1.35; color: #9AA5C2; }
+  footer { display: flex; justify-content: space-between; font-size: 12px; color: #7F8AAC; }
+  footer b { color: #C3CCE8; font-weight: 500; }
+  footer .right { font-family: "Cascadia Mono", Consolas, monospace; font-size: 11px; }
+</style>
+</head>
+<body>
+
+<header>
+  <img class="logo" src="../../converter/assets/converter_icon_256.png" alt="">
+  <div class="brand">Converter</div>
+  <div class="sub">Windows desktop app · file converter</div>
+  <div class="spacer"></div>
+  <div class="pill">PDF <b>&rarr;</b> DOCX · MD · TXT</div>
+</header>
+
+<div class="headline">
+  <h1>It rebuilds the document, it doesn't <em>dump</em> it.</h1>
+  <p>Converter reads the page geometry, then writes real Word structure: headings, lists, tables, page breaks.</p>
+</div>
+
+<div class="window">
+  <div class="titlebar">
+    <img src="../../converter/assets/converter_icon_256.png" alt="">
+    <span>Converter</span>
+    <span class="dots"><i style="background:#3C3C3C"></i><i style="background:#3C3C3C"></i><i style="background:#E05252"></i></span>
+  </div>
+  <img class="shot" src="stardance-app.png" alt="Converter converting three PDFs">
+</div>
+
+<div class="metrics">
+  <div class="metric">
+    <div class="num ok">9</div>
+    <div class="lab">real headings recovered from one paper (title + 8 sections)</div>
+  </div>
+  <div class="metric">
+    <div class="num ok">6</div>
+    <div class="lab">tables kept whole instead of split into fragments</div>
+  </div>
+  <div class="metric">
+    <div class="num">53 &rarr; 5.4 MB</div>
+    <div class="lab">Markdown size after re-encoding PDF images to PNG</div>
+  </div>
+  <div class="metric">
+    <div class="num ok">0</div>
+    <div class="lab">AI calls — deterministic engine, offline, MIT licensed</div>
+  </div>
+</div>
+
+<footer>
+  <span>Locked against <b>147 readable real PDF/DOCX baselines</b></span>
+  <span class="right">Windows desktop app · pdfminer.six + python-docx</span>
+</footer>
+
+</body>
+</html>
