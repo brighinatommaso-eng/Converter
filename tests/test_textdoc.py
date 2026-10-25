@@ -648,6 +648,32 @@ def test_pdf_numbered_heading_slightly_larger_than_body_stays_separate(tmp_path)
     assert heading.level == 1
 
 
+def test_pdf_images_are_stored_as_compact_png():
+    """pdfminer esporta BMP grezzi: l'IR li converte in PNG per non gonfiare i writer."""
+    import io
+
+    from PIL import Image
+
+    from converter.converters.docmodel.pdfreader import _compact_image
+
+    buffer = io.BytesIO()
+    Image.new("RGB", (120, 80), (40, 90, 200)).save(buffer, format="BMP")
+    bmp = buffer.getvalue()
+    data, ext = _compact_image(bmp, "bmp")
+    assert ext == "png"
+    assert data.startswith(b"\x89PNG\r\n\x1a\n")
+    assert len(data) < len(bmp)
+
+    # Un formato già compresso non viene ricodificato.
+    png_buffer = io.BytesIO()
+    Image.new("RGB", (8, 8), (0, 0, 0)).save(png_buffer, format="PNG")
+    png = png_buffer.getvalue()
+    assert _compact_image(png, "png") == (png, "png")
+
+    # Flusso illeggibile: si tiene l'originale invece di perdere l'immagine.
+    assert _compact_image(b"not an image", "bmp") == (b"not an image", "bmp")
+
+
 def _set_numbering(paragraph, num_id: int, level: int = 0) -> None:
     from docx.oxml import OxmlElement
     from docx.oxml.ns import qn

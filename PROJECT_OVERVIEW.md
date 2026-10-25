@@ -152,11 +152,11 @@ Theme preference is stored via `QSettings("Converter","Converter")`.
 ## 9. Testing
 
 - Run: `python -m pytest -q` (config in `pyproject.toml`, `testpaths=["tests"]`).
-- **Current status in this workspace: 447 collected — 427 passing, 20 xfailed** (measured
+- **Current status in this workspace: 448 collected — 428 passing, 20 xfailed** (measured
   2026-10-25 with ffmpeg, LibreOffice, pandoc, python-docx and trimesh present). The 20
   xfails are corrupt/encrypted files in the local real-document corpus (see
   `tests/corpus/README.md`); the 147 readable corpus documents are regression-locked.
-  Without `tests/corpus/local/`, the corpus test skips and the suite is 279 passed.
+  Without `tests/corpus/local/`, the corpus test skips and the suite is 280 passed.
 - GUI tests set `QT_QPA_PLATFORM=offscreen` (keep that for new GUI tests, or they need a
   display). GUI tests are behavioral (`test_gui_engine_toggle`, `test_gui_history`,
   `test_gui_options`, `test_gui_batch`) — they don't assert theme/layout, so visual
@@ -327,8 +327,8 @@ real Windows Qt run, not offscreen.")
 
 - Redesigned GUI integrated; the review-pass fixes of §22 applied; the same-format data
   fix + two minor GUI fixes of §23 applied; the 3D-model converter of §24 added; the
-  structured document engine of §21 replaced the pdf2docx import; **427 tests passing,
-  20 xfailed** with the local real-document corpus (279 passing without it), measured
+  structured document engine of §21 replaced the pdf2docx import; **428 tests passing,
+  20 xfailed** with the local real-document corpus (280 passing without it), measured
   2026-10-25 in an environment with all external tools present, trimesh included.
 - The shipped exe (`dist/Converter/Converter.exe`) was rebuilt on 2026-10-25 with
   `converter.spec` and now runs the structured engine: `--selftest` passes (including
@@ -504,7 +504,7 @@ baselines — see `tests/corpus/README.md`): 147 readable documents pass, 20
 corrupt/encrypted files xfail; in `CORPUS_UPDATE=1` mode unreadable files
 without a baseline skip instead of failing. Stale `pdf_import` tests were
 deleted/updated (matrix, document converter, risk 9/17).
-Full suite: **427 passed, 20 xfailed** with the local corpus (279 passed without
+Full suite: **428 passed, 20 xfailed** with the local corpus (280 passed without
 it), 2026-10-25.
 
 **Corpus pass (2026-10-24).** 167 real PDF/DOCX files (Unstructured
@@ -560,6 +560,16 @@ longer merges into the following paragraph. Corpus effect: 9 baselines changed,
 all removals of stamp junk; the two DPR papers gained their section headings
 (`1 Introduction` … `8 Conclusion`) and lost the fake `C`/`X` headings. Two
 regression tests in `test_textdoc.py` cover the stamp and the numbered heading.
+
+**Compact PDF images (2026-10-25).** pdfminer exports most PDF images as raw
+BMP: `layout-parser-paper.pdf` carried 40 MB of images, which became 53 MB of
+Markdown once base64-encoded. `_compact_image` now re-encodes uncompressed
+formats (BMP, TIFF) to lossless PNG at extraction time, so the IR, the DOCX and
+the Markdown/HTML all shrink; already-compressed formats are kept untouched and
+an unreadable stream falls back to the original bytes. Same document: 40 MB →
+4.05 MB of image data, 53 MB → 5.4 MB of Markdown. The corpus baselines only
+record image sizes, so they are unchanged; one regression test covers the
+conversion and the two fallbacks.
 
 ---
 
@@ -757,6 +767,6 @@ in-process like `image.py`, so it works in both Full and Portable — no externa
   `pdf-import` extra removed; `converter.spec` collects `docx` templates and no longer
   excludes/cites pdf2docx/fitz; `THIRD_PARTY_NOTICES.md` states no AGPL PDF engine is
   used. README/CLAUDE.md updated accordingly.
-- **Proof:** `ruff check .` clean; full suite `427 passed, 20 xfailed` with the local
+- **Proof:** `ruff check .` clean; full suite `428 passed, 20 xfailed` with the local
   corpus (2026-10-25; the xfails are corrupt/encrypted corpus files, not the empty
   corpus). The Windows exe was rebuilt on 2026-10-25 (see §18).

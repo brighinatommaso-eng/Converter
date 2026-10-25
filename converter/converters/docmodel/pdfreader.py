@@ -17,6 +17,7 @@ font, immagini, linee) pdfminer ce l'ha.
 
 from __future__ import annotations
 
+import io
 import re
 import tempfile
 from bisect import bisect_right
@@ -986,6 +987,34 @@ def _drop_repeated_margins(pages: list[dict], page_height: float) -> None:
 
 # --- Lettura ---------------------------------------------------------------
 
+_COMPRESSED_IMAGE_EXTS = {"png", "jpg", "jpeg", "gif", "webp"}
+
+
+def _compact_image(data: bytes, ext: str) -> tuple[bytes, str]:
+    """BMP/TIFF grezzi -> PNG lossless, così l'IR (e ogni writer) resta leggero.
+
+    pdfminer esporta la maggior parte delle immagini come BMP non compresso: un
+    paper di 16 pagine passava da 40 MB di immagini a ~4 MB, e il Markdown da
+    53 MB a ~5 MB. I formati già compressi non vengono ricodificati; se la
+    conversione fallisce o non conviene, si tiene il flusso originale.
+    """
+    if ext in _COMPRESSED_IMAGE_EXTS:
+        return data, ext
+    try:
+        from PIL import Image
+
+        with Image.open(io.BytesIO(data)) as image:
+            image.load()
+            if image.mode in ("CMYK", "F"):
+                image = image.convert("RGB")
+            buffer = io.BytesIO()
+            image.save(buffer, format="PNG", optimize=True)
+        png = buffer.getvalue()
+    except Exception:
+        return data, ext
+    return (png, "png") if len(png) < len(data) else (data, ext)
+
+
 def _collect_page(layout, image_writer, tmp_dir: str) -> dict:
     from pdfminer.layout import LTFigure, LTImage, LTLine, LTRect, LTTextLine
 
@@ -1007,8 +1036,10 @@ def _collect_page(layout, image_writer, tmp_dir: str) -> dict:
                     path = Path(tmp_dir) / name
                     if path.exists() and path.stat().st_size > 0:
                         x0, y0, x1, y1 = node.bbox
+                        data, ext = _compact_image(path.read_bytes(),
+                                                   path.suffix.lstrip(".").lower() or "png")
                         images.append(ImageBlock(
-                            data=path.read_bytes(), ext=path.suffix.lstrip(".").lower() or "png",
+                            data=data, ext=ext,
                             width_pt=x1 - x0, height_pt=y1 - y0, x=x0, y=y0))
             except Exception:
                 pass   # immagine non estraibile (filtri esotici): si prosegue
