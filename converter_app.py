@@ -423,6 +423,23 @@ def _selftest_honesty_checks(d, ff, gen_media) -> dict[str, object]:
         return True if not found else f"FAIL bundled anyway: {found}"
 
     check("bundle free of unused optional modules", no_unused_modules)
+
+    # --- Icona della finestra/taskbar: Qt deve riuscire a caricarla davvero ------
+    def app_icon():
+        # Sul file .exe l'icona la incorpora PyInstaller; quella di finestra e
+        # taskbar la carica Qt a runtime: se è vuota Windows mostra quella generica.
+        from PySide6.QtGui import QGuiApplication
+
+        _app = QGuiApplication.instance() or QGuiApplication([sys.argv[0]])  # noqa: F841
+        from converter.gui.app import _app_icon
+
+        icon = _app_icon()
+        sizes = sorted({size.width() for size in icon.availableSizes()})
+        if icon.isNull() or not {16, 32, 48} <= set(sizes):
+            return f"FAIL icon sizes={sizes}"
+        return True
+
+    check("window/taskbar icon loads", app_icon)
     return out
 
 
