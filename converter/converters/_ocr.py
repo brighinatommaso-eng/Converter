@@ -44,21 +44,48 @@ def available() -> bool:
             and deps.find_tesseract() is not None)
 
 
-def _has_page_images(src: Path) -> bool:
-    """True se le prime pagine contengono immagini (il segno di una scansione)."""
-    from pdfminer.high_level import extract_pages
-    from pdfminer.layout import LTImage
+def _probe_first_pages(src: Path) -> tuple[int, bool]:
+    """(caratteri non-spazio, ci sono immagini?) delle prime pagine.
 
-    def walk(node) -> bool:
+    Usa il documento e l'interprete TOLLERANTI del lettore strutturale: un PDF
+    con metadati malformati o un profilo colore rotto si legge, quindi non va
+    rifiutato qui come "illeggibile" prima ancora di provarci."""
+    from pdfminer.converter import PDFPageAggregator
+    from pdfminer.layout import LAParams, LTImage, LTText
+    from pdfminer.pdfinterp import PDFResourceManager
+
+    from .docmodel.pdfreader import _tolerant_classes, iter_pdf_pages
+
+    _, interpreter_class = _tolerant_classes()
+    manager = PDFResourceManager(caching=True)
+    device = PDFPageAggregator(manager, laparams=LAParams())
+    interpreter = interpreter_class(manager, device)
+    chars = 0
+    images = False
+
+    def walk(node) -> None:
+        nonlocal chars, images
         if isinstance(node, LTImage):
-            return True
+            images = True
+            return
+        if isinstance(node, LTText) and not hasattr(node, "__iter__"):
+            chars += len("".join(node.get_text().split()))
+            return
         try:
             children = list(node)
         except TypeError:
-            return False
-        return any(walk(child) for child in children)
+            return
+        for child in children:
+            walk(child)
 
-    return any(walk(page) for page in extract_pages(str(src), maxpages=SCAN_CHECK_MAX_PAGES))
+    with open(src, "rb") as handle:
+        for page in iter_pdf_pages(handle, maxpages=SCAN_CHECK_MAX_PAGES):
+            try:
+                interpreter.process_page(page)
+            except Exception:
+                continue          # pagina rotta: la decide il lettore vero
+            walk(device.get_result())
+    return chars, images
 
 
 _TEXT_CHECKS: dict[tuple[str, int, int], bool] = {}
@@ -100,10 +127,16 @@ def _check_extractable_text(src: Path) -> bool:
     """
     from pdfminer.high_level import extract_text
 
-    text = extract_text(str(src), maxpages=SCAN_CHECK_MAX_PAGES)
+    try:
+        text = extract_text(str(src), maxpages=SCAN_CHECK_MAX_PAGES)
+    except Exception:
+        # pdfminer "rigido" non lo apre (metadati/risorse difettosi): decide la
+        # lettura tollerante, che è quella che userà poi la conversione.
+        chars, images = _probe_first_pages(src)
+        return chars >= MIN_TEXT_CHARS or not images
     if len("".join(text.split())) >= MIN_TEXT_CHARS:
         return True
-    return not _has_page_images(src)
+    return not _probe_first_pages(src)[1]
 
 
 def apply(src: Path, dst: Path) -> tuple[bool, str]:

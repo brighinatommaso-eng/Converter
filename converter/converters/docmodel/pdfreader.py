@@ -17,6 +17,7 @@ font, immagini, linee) pdfminer ce l'ha.
 
 from __future__ import annotations
 
+import contextvars
 import io
 import re
 import tempfile
@@ -119,8 +120,17 @@ def _color_of(char) -> str:
     return f"#{r:02x}{g:02x}{b:02x}"
 
 
+# pdfminer scrive "(cid:N)" per un glifo che il font non mappa su Unicode (niente
+# ToUnicode): il carattere vero è ignoto. Lasciarlo dava testo spazzatura,
+# toglierlo poteva cambiare il senso (un segno meno perso: −0,94 → 0,94).
+_CID_RE = re.compile(r"\(cid:\d+\)")
+UNDECODED = "\ufffd"     # carattere sostitutivo Unicode, dichiarato nel verdetto
+
+
 def _clean_text(text: str) -> str:
     """Normalizza i glifi delle aree private (Symbol/Wingdings) in Unicode."""
+    if "(cid:" in text:
+        text = _CID_RE.sub(UNDECODED, text)
     table = {
         "\uf0b7": "•", "\uf0a7": "▪", "\uf0d8": "➢", "\uf0fc": "✓",
         "\uf0a8": "◆", "\uf0e8": "➔", "\uf0b0": "°", "\uf0d7": "•",
@@ -533,10 +543,14 @@ def _assign_row(fragments: list[Line], columns: list[float]) -> list[_Cell | Non
         if not group:
             cells.append(None)
             continue
+        # Ordine di lettura dentro la cella: riga per riga dall'alto, poi da
+        # sinistra (una cella multilinea non deve mescolare le sue righe).
+        group.sort(key=lambda word: (-round(word[3].y, 1), word[0]))
         fragment = group[0][3]
+        bottom = min(word[3].y for word in group)
         cells.append((min(word[0] for word in group), max(word[1] for word in group),
                       fragment.y, " ".join(word[2] for word in group), fragment.bold,
-                      fragment.size, fragment.height))
+                      fragment.size, fragment.height + (fragment.y - bottom)))
     return cells
 
 
@@ -706,9 +720,76 @@ def _median_size(cells: list[_Cell]) -> float:
     return sizes[len(sizes) // 2]
 
 
+# Gutter della pagina in esame, impostate da _build_aligned_tables. ContextVar e
+# non globale: la GUI converte più file in parallelo su thread diversi.
+_PAGE_GUTTERS: contextvars.ContextVar[tuple[tuple[float, float], ...]] = contextvars.ContextVar(
+    "_PAGE_GUTTERS", default=())
+
+
+def _region(x: float, gutters) -> int:
+    """Indice della colonna di pagina (tra le gutter) che contiene la coordinata x."""
+    return sum(1 for _, gutter_right in gutters if gutter_right <= x + 0.5)
+
+
+def _prose_regions(items, x_of, words_of) -> set[int]:
+    """Colonne di pagina che sono prosa A SINISTRA della tabella nella banda.
+
+    Una colonna è prosa se ogni suo elemento ha 4+ parole; conta solo se a destra
+    c'è una colonna "da tabella" (celle corte). Una descrizione lunga in fondo a
+    una tabella (a destra) non è prosa da scartare."""
+    gutters = _PAGE_GUTTERS.get()
+    if not gutters:
+        return set()
+    by_region: dict[int, list[int]] = {}
+    for item in items:
+        by_region.setdefault(_region(x_of(item), gutters), []).append(words_of(item))
+    tabular = [region for region, words in by_region.items() if any(count < 4 for count in words)]
+    if not tabular:
+        return set()
+    return {region for region, words in by_region.items()
+            if all(count >= 4 for count in words) and region < max(tabular)}
+
+
+def _table_cells(cells: list[_Cell]) -> list[_Cell]:
+    """Celle "da tabella" di una banda: senza la prosa della colonna di pagina accanto.
+
+    Quando una tabella sta in una colonna e la prosa nell'altra, ogni banda
+    orizzontale contiene anche una riga di prosa, oltre una gutter: per gli
+    allineamenti tra righe di tabella quella cella non va contata."""
+    prose = _prose_regions(cells, lambda cell: cell[0], lambda cell: len(cell[3].split()))
+    if not prose:
+        return cells
+    gutters = _PAGE_GUTTERS.get()
+    return [cell for cell in cells if _region(cell[0], gutters) not in prose]
+
+
+def _table_fragments(fragments: list[Line]) -> list[Line]:
+    """Frammenti della banda che non sono prosa della colonna accanto."""
+    prose = _prose_regions(fragments, lambda line: line.x,
+                           lambda line: len(line.text.split()))
+    if not prose:
+        return list(fragments)
+    gutters = _PAGE_GUTTERS.get()
+    return [line for line in fragments if _region(line.x, gutters) not in prose]
+
+
+def _aligned_with(candidate_cells: list[_Cell], previous_cells: list[_Cell]) -> bool:
+    """True se almeno metà delle celle candidate parte sotto una colonna di sopra.
+
+    Una riga di prosa con il titolo di sezione nel margine ("2.3.59.7 | (1) Le
+    abbreviazioni…") ha due celle anche lei, ma non sulle colonne della tabella."""
+    # Si misura la riga con MENO celle contro l'altra: un'intestazione su due
+    # righe ("concentration (g) … resistance (Ω)") ha meno celle dei dati sotto.
+    fewer, more = sorted((_table_cells(candidate_cells), _table_cells(previous_cells)), key=len)
+    starts = [cell[0] for cell in more]
+    aligned = sum(1 for cell in fewer
+                  if any(abs(cell[0] - start) <= _COLUMN_TOL for start in starts))
+    return aligned * 2 >= len(fewer)
+
+
 def _continues_table(previous: tuple[int, float, list[_Cell], list[Line]],
                      candidate: tuple[int, float, list[_Cell], list[Line]],
-                     bands: list[list]) -> bool:
+                     bands: list[list], pitch: float | None = None) -> bool:
     """True se la riga candidata continua la tabella della riga precedente.
 
     Tra due righe di tabella può cadere una riga di prosa dell'altra colonna:
@@ -720,13 +801,111 @@ def _continues_table(previous: tuple[int, float, list[_Cell], list[Line]],
     """
     if abs(_median_size(previous[2]) - _median_size(candidate[2])) > 2.0:
         return False
+    if not _aligned_with(candidate[2], previous[2]):
+        return False
     if candidate[0] == previous[0] + 1:
-        return True
-    left = min(fragment.x for fragment in previous[3])
-    right = max(fragment.right for fragment in previous[3])
-    return all(fragment.right <= left or fragment.x >= right
-               for index in range(previous[0] + 1, candidate[0])
-               for fragment in bands[index][1])
+        return _close_enough(previous, previous[1], candidate, pitch)
+    # Larghezza della TABELLA (senza la riga di prosa della colonna accanto che
+    # condivide la banda): la prosa tra due righe sta fuori e non le separa.
+    table_cells = _table_cells(previous[2])
+    left = min(cell[0] for cell in table_cells)
+    right = max(cell[1] for cell in table_cells)
+    last_y = previous[1]
+    for index in range(previous[0] + 1, candidate[0]):
+        band_y, fragments = bands[index]
+        if (_is_cell_continuation(fragments, previous, last_y)
+                or _is_row_label(fragments, previous, last_y, candidate[1])):
+            # Seconda riga di una cella multilinea (descrizione che va a capo) o
+            # etichetta unita su più righe ("DP" centrato tra NLL e Triplet):
+            # fanno parte della tabella, non la interrompono.
+            last_y = band_y
+            continue
+        if not all(fragment.right <= left or fragment.x >= right for fragment in fragments):
+            return False
+    return _close_enough(previous, last_y, candidate, pitch)
+
+
+def _close_enough(previous, last_y: float, candidate, pitch: float | None) -> bool:
+    """Un vuoto verticale molto più ampio del passo delle righe chiude la tabella:
+    quello che segue è un altro blocco anche se ha colonne simili."""
+    line_height = max((cell[6] for cell in previous[2]), default=10.0) or 10.0
+    limit = max(3.0 * line_height, 1.8 * pitch) if pitch else 3.0 * line_height
+    return last_y - candidate[1] <= limit + line_height
+
+
+def _is_cell_continuation(fragments: list[Line],
+                          previous: tuple[int, float, list[_Cell], list[Line]],
+                          last_y: float) -> bool:
+    """True se la banda è il seguito di una cella della riga di tabella sopra.
+
+    Nei manuali e nei moduli la descrizione dell'ultima colonna va a capo: la
+    riga successiva ha UNA sola cella, allineata sotto una colonna che non è la
+    prima. Prima quella riga spezzava la tabella in frammenti (e il suo testo
+    finiva fuori, come paragrafo). Una riga che parte dalla prima colonna è una
+    riga nuova, non un seguito; una lontana in verticale è altro testo."""
+    cells = [cell for fragment in _table_fragments(fragments) for cell in _line_cells(fragment)]
+    if len(cells) != 1 or len(previous[2]) < 2:
+        return False
+    x0, x1, y, _, _, size, height = cells[0]
+    row = sorted(_table_cells(previous[2]), key=lambda cell: cell[0])
+    if len(row) < 2:
+        return False
+    second_column = row[1][0]
+    right = max(cell[1] for cell in row)
+    if x0 < second_column - _COLUMN_TOL or x1 > right + _COLUMN_TOL * 4:
+        return False
+    if abs(size - _median_size(previous[2])) > 2.0:
+        return False
+    line_height = max(height, size, 1.0)
+    return 0 < last_y - y <= line_height * 2.2
+
+
+def _is_row_label(fragments: list[Line],
+                  previous: tuple[int, float, list[_Cell], list[Line]],
+                  last_y: float, next_y: float | None) -> bool:
+    """True se la banda è un'etichetta unita in verticale su più righe.
+
+    Nelle tabelle dei paper ("DP" / "L2" per due righe ciascuna) l'etichetta è
+    centrata TRA le righe che raggruppa, in una colonna a sinistra della prima
+    cella della riga sopra. Senza questo riconoscimento spezzava la tabella."""
+    cells = [cell for fragment in _table_fragments(fragments) for cell in _line_cells(fragment)]
+    if len(cells) != 1 or next_y is None:
+        return False
+    x0, x1, y, _, _, size, height = cells[0]
+    first_column = min(cell[0] for cell in _table_cells(previous[2]))
+    if x1 > first_column - 2.0:
+        return False
+    if abs(size - _median_size(previous[2])) > 2.0:
+        return False
+    line_height = max(height, size, 1.0)
+    # Stretta tra la riga sopra e quella sotto, senza vuoti propri.
+    return 0 < last_y - y <= line_height * 1.2 and 0 < y - next_y <= line_height * 1.2
+
+
+def _attach_continuations(group: list[tuple[int, float, list[_Cell], list[Line]]],
+                          bands: list[list]) -> list[tuple[int, float, list[_Cell], list[Line]]]:
+    """Aggiunge a ogni riga del gruppo le righe di seguito delle sue celle."""
+    attached = []
+    for position, candidate in enumerate(group):
+        stop = group[position + 1][0] if position + 1 < len(group) else len(bands)
+        extra: list[Line] = []
+        last_y = candidate[1]
+        next_y = group[position + 1][1] if position + 1 < len(group) else None
+        for index in range(candidate[0] + 1, stop):
+            band_y, fragments = bands[index]
+            if not (_is_cell_continuation(fragments, candidate, last_y)
+                    or _is_row_label(fragments, candidate, last_y, next_y)):
+                break
+            extra.extend(_table_fragments(fragments))   # mai la prosa accanto
+            last_y = band_y
+        # Le celle aggiunte contano per le colonne: un'etichetta unita ("DP")
+        # ha la sua colonna, non si incolla alla cella accanto.
+        cells = list(candidate[2])
+        for fragment in extra:
+            cells.extend(_line_cells(fragment))
+        cells.sort(key=lambda cell: cell[0])
+        attached.append((candidate[0], candidate[1], cells, list(candidate[3]) + extra))
+    return attached
 
 
 def _build_aligned_tables(lines: list[Line], page_height: float,
@@ -741,6 +920,15 @@ def _build_aligned_tables(lines: list[Line], page_height: float,
     tabella, è un layout a colonne. Con tre o più colonne serve una didascalia,
     un'intestazione in grassetto o celle numeriche.
     """
+    token = _PAGE_GUTTERS.set(tuple(gutters))
+    try:
+        return _build_aligned_tables_inner(lines, page_height, ruled, gutters)
+    finally:
+        _PAGE_GUTTERS.reset(token)
+
+
+def _build_aligned_tables_inner(lines: list[Line], page_height: float, ruled: list[Table],
+                                gutters: list[tuple[float, float]]) -> list[Table]:
     bands = _row_bands(lines)
     candidates: list[tuple[int, float, list[_Cell], list[Line]]] = []
     for index, (y, fragments) in enumerate(bands):
@@ -748,14 +936,20 @@ def _build_aligned_tables(lines: list[Line], page_height: float,
         for fragment in sorted(fragments, key=lambda item: item.x):
             cells.extend(_line_cells(fragment))
         cells.sort(key=lambda cell: cell[0])
-        if len(cells) >= 2:
+        # Una banda con UNA sola cella corta più una riga di prosa accanto non è
+        # una riga di tabella: è un'etichetta o un seguito (vedi sotto).
+        if len(cells) >= 2 and len(_table_cells(cells)) >= 2:
             candidates.append((index, y, cells, fragments))
     if len(candidates) < 2:
         return []
 
     groups: list[list[tuple[int, float, list[_Cell], list[Line]]]] = []
     for candidate in candidates:
-        if groups and _continues_table(groups[-1][-1], candidate, bands):
+        pitch = None
+        if groups and len(groups[-1]) >= 2:
+            steps = sorted(a[1] - b[1] for a, b in zip(groups[-1], groups[-1][1:], strict=False))
+            pitch = steps[len(steps) // 2]
+        if groups and _continues_table(groups[-1][-1], candidate, bands, pitch):
             groups[-1].append(candidate)
         else:
             groups.append([candidate])
@@ -764,6 +958,7 @@ def _build_aligned_tables(lines: list[Line], page_height: float,
     for group in groups:
         if len(group) < 2:
             continue
+        group = _attach_continuations(group, bands)
         rows = [candidate[2] for candidate in group]
         all_cells = [cell for row in rows for cell in row]
         columns = _cluster([cell[0] for cell in all_cells], tol=_COLUMN_TOL)
@@ -827,7 +1022,8 @@ def _table_from_group(group: list[tuple[int, float, list[_Cell], list[Line]]],
     median = lengths[len(lengths) // 2]
     numeric = sum(1 for text in texts
                   if _NUMERIC_CELL_RE.match(text) and any(ch.isdigit() for ch in text)) / len(texts)
-    y0 = min(candidate[1] for candidate in group)
+    # Il fondo della tabella include le righe di seguito dell'ultima riga.
+    y0 = min(min(fragment.y for fragment in candidate[3]) for candidate in group)
     y1 = max(candidate[1] + max(cell[6] for cell in candidate[2]) for candidate in group)
     x0 = min(cell[0] for grid in cell_rows for cell in grid if cell)
     x1 = max(cell[1] for grid in cell_rows for cell in grid if cell)
@@ -1068,6 +1264,58 @@ def _compact_image(data: bytes, ext: str) -> tuple[bytes, str]:
     return (png, "png") if len(png) < len(data) else (data, ext)
 
 
+def _ccitt_image(node) -> bytes | None:
+    """Immagine CCITT (fax G3/G4) decodificata da libtiff via Pillow, in PNG.
+
+    pdfminer la decodifica in Python puro: ~6 s per UNA pagina A4 a 300 dpi,
+    minuti per una scansione di qualche decina di pagine. Avvolgendo il flusso
+    grezzo in un'intestazione TIFF, Pillow (libtiff, in C) la decodifica in
+    millisecondi. Qualunque caso insolito torna None e ripiega su pdfminer."""
+    import struct
+
+    try:
+        filters = node.stream.get_filters()
+        if len(filters) != 1 or getattr(filters[0][0], "name", "") != "CCITTFaxDecode":
+            return None
+        params = filters[0][1] or {}
+        if isinstance(params, list):
+            params = params[0] if params else {}
+        k = int(params.get("K", 0))
+        width = int(params.get("Columns", node.srcsize[0]) or node.srcsize[0])
+        height = int(params.get("Rows", node.srcsize[1]) or node.srcsize[1])
+        black_is_1 = bool(params.get("BlackIs1", False))
+        data = node.stream.get_rawdata()
+        if not data or width <= 0 or height <= 0:
+            return None
+        compression = 4 if k < 0 else 3
+        t4_options = 1 if k > 0 else 0          # G3 2D quando K > 0
+        # BlackIs1=false (default PDF): i bit 0 sono neri → BlackIsZero (1).
+        photometric = 0 if black_is_1 else 1
+        tags = [(256, 4, width), (257, 4, height), (258, 3, 1), (259, 3, compression),
+                (262, 3, photometric), (273, 4, 0), (277, 3, 1), (278, 4, height),
+                (279, 4, len(data))]
+        if compression == 3:
+            tags.append((292, 4, t4_options))
+        header_size = 8 + 2 + 12 * len(tags) + 4
+        entries = b"".join(
+            struct.pack("<HHII", tag, kind, 1, header_size if tag == 273 else value)
+            if kind == 4 else struct.pack("<HHIHH", tag, kind, 1, value, 0)
+            for tag, kind, value in tags)
+        tiff = (b"II" + struct.pack("<HI", 42, 8) + struct.pack("<H", len(tags)) + entries
+                + struct.pack("<I", 0) + data)
+        from PIL import Image
+
+        with Image.open(io.BytesIO(tiff)) as image:
+            image.load()
+            if image.size != (width, height):
+                return None
+            buffer = io.BytesIO()
+            image.convert("1").save(buffer, format="PNG", optimize=True)
+        return buffer.getvalue()
+    except Exception:
+        return None
+
+
 def _collect_page(layout, image_writer, tmp_dir: str) -> dict:
     from pdfminer.layout import LTFigure, LTImage, LTLine, LTRect, LTTextLine
 
@@ -1083,6 +1331,12 @@ def _collect_page(layout, image_writer, tmp_dir: str) -> dict:
                 (rotated if _is_rotated(node) else lines).append(line)
             return
         if isinstance(node, LTImage):
+            fast = _ccitt_image(node)
+            if fast is not None:
+                x0, y0, x1, y1 = node.bbox
+                images.append(ImageBlock(data=fast, ext="png", width_pt=x1 - x0,
+                                         height_pt=y1 - y0, x=x0, y=y0))
+                return
             try:
                 name = image_writer.export_image(node)
                 if name:
@@ -1119,25 +1373,103 @@ def _collect_page(layout, image_writer, tmp_dir: str) -> dict:
             "width": layout.width, "height": layout.height}
 
 
+def _tolerant_classes():
+    """Documento e interprete pdfminer che non abbandonano un PDF per un difetto locale.
+
+    * Dizionario /Info (titolo, autore) malformato: è FACOLTATIVO per lo standard,
+      ma pdfminer lo risolve aprendo il documento e un errore di sintassi lì
+      rifiutava tutto il file (es. un titolo LaTeX con spazi non escapati).
+    * Spazio colore ICCBased senza /N o simili: pdfminer fallisce l'intera pagina
+      inizializzando le risorse; senza quegli spazi colore il testo si legge
+      ugualmente (i colori ricadono sul default).
+    """
+    from pdfminer.pdfdocument import PDFDocument
+    from pdfminer.pdfinterp import PDFPageInterpreter
+    from pdfminer.pdftypes import PDFObjRef
+    from pdfminer.psexceptions import PSException
+
+    class TolerantDocument(PDFDocument):
+        def __init__(self, parser, *args, **kwargs):
+            self._broken_info: set[int] = set()
+            try:
+                super().__init__(parser, *args, **kwargs)
+            except PSException:
+                broken = set()
+                for xref in getattr(self, "xrefs", []):
+                    trailer = xref.get_trailer() or {}
+                    info = trailer.get("Info")
+                    if isinstance(info, PDFObjRef):
+                        broken.add(info.objid)
+                if not broken:
+                    raise
+                # Secondo tentativo: /Info illeggibile = metadati vuoti (prima di
+                # ripartire, perché il costruttore lo risolve subito).
+                self._broken_info = broken
+                parser.fp.seek(0)
+                type(parser).__init__(parser, parser.fp)
+                super().__init__(parser, *args, **kwargs)
+
+        def getobj(self, objid):
+            if objid in getattr(self, "_broken_info", ()):
+                return {}
+            return super().getobj(objid)
+
+    class TolerantInterpreter(PDFPageInterpreter):
+        def init_resources(self, resources):
+            try:
+                super().init_resources(resources)
+            except Exception:
+                if not isinstance(resources, dict) or "ColorSpace" not in resources:
+                    raise
+                safe = {key: value for key, value in resources.items() if key != "ColorSpace"}
+                super().init_resources(safe)
+
+    return TolerantDocument, TolerantInterpreter
+
+
+def iter_pdf_pages(handle, maxpages: int = 0):
+    """Pagine pdfminer di un PDF aperto, con il documento tollerante."""
+    from pdfminer.pdfpage import PDFPage
+    from pdfminer.pdfparser import PDFParser
+
+    document_class, _ = _tolerant_classes()
+    document = document_class(PDFParser(handle))
+    for index, page in enumerate(PDFPage.create_pages(document)):
+        if maxpages and index >= maxpages:
+            break
+        yield page
+
+
 def read_pdf(path: Path) -> Document:
-    """PDF → Document. Solleva ValueError con messaggio pulito se il PDF è illeggibile."""
+    """PDF → Document. Solleva ValueError con messaggio pulito se il PDF è illeggibile.
+
+    Una pagina che non si riesce a interpretare viene saltata e contata in
+    `Document.skipped_pages`: un difetto locale non deve costare l'intero file,
+    ma nemmeno sparire in silenzio (il verdetto lo dichiara)."""
     from pdfminer.converter import PDFPageAggregator
     from pdfminer.image import ImageWriter
     from pdfminer.layout import LAParams
     from pdfminer.pdfdocument import PDFPasswordIncorrect
-    from pdfminer.pdfinterp import PDFPageInterpreter, PDFResourceManager
-    from pdfminer.pdfpage import PDFPage
+    from pdfminer.pdfinterp import PDFResourceManager
 
+    _, interpreter_class = _tolerant_classes()
     manager = PDFResourceManager(caching=True)
     pages: list[dict] = []
+    skipped = 0
     with tempfile.TemporaryDirectory() as tmp_dir:
         writer = ImageWriter(tmp_dir)
         device = PDFPageAggregator(manager, laparams=LAParams())
-        interpreter = PDFPageInterpreter(manager, device)
+        interpreter = interpreter_class(manager, device)
         try:
             with open(path, "rb") as handle:
-                for page in PDFPage.get_pages(handle, check_extractable=False):
-                    interpreter.process_page(page)
+                for page in iter_pdf_pages(handle):
+                    try:
+                        interpreter.process_page(page)
+                    except PDFPasswordIncorrect:
+                        raise
+                    except Exception:
+                        skipped += 1
+                        continue
                     pages.append(_collect_page(device.get_result(), writer, tmp_dir))
         except PDFPasswordIncorrect as exc:
             raise ValueError(
@@ -1146,12 +1478,32 @@ def read_pdf(path: Path) -> Document:
             raise ValueError(f"Could not read this PDF: {exc}") from exc
 
         if not pages:
+            if skipped:
+                raise ValueError(f"Could not read this PDF: none of its {skipped} page(s) "
+                                 f"could be interpreted.")
             raise ValueError("Could not read this PDF: it has no pages.")
 
         page_width = max(p["width"] for p in pages) or 595.0
         page_height = max(p["height"] for p in pages) or 842.0
         _drop_repeated_margins(pages, page_height)
-        return _assemble(pages, page_width, page_height)
+        document = _assemble(pages, page_width, page_height)
+        document.skipped_pages = skipped
+        document.undecoded_chars = _count_undecoded(document)
+        return document
+
+
+def _count_undecoded(document: Document) -> int:
+    """Quanti caratteri il PDF non permette di decodificare (vedi `_CID_RE`)."""
+    def paragraphs():
+        for block in document.blocks:
+            if isinstance(block, Paragraph):
+                yield block
+            elif isinstance(block, ListBlock):
+                yield from (item.paragraph for item in block.items)
+            elif isinstance(block, Table):
+                yield from (p for row in block.rows for cell in row for p in cell.paragraphs)
+    return sum(run.text.count(UNDECODED) for paragraph in paragraphs()
+               for line in paragraph.lines for run in line.runs)
 
 
 def _assemble(pages: list[dict], page_width: float, page_height: float) -> Document:
