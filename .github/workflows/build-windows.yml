@@ -67,35 +67,57 @@ jobs:
       - name: Python dependencies
         run: pip install -r requirements.txt "pyinstaller>=6.10"
 
-      - name: External tools (ffmpeg, pandoc, LibreOffice, Inno Setup)
+      # Un passo per tool, ognuno con timeout: un download appeso (è successo: 35 min
+      # fermi senza log) fallisce in fretta e il nome del passo dice quale.
+      - name: ffmpeg
+        timeout-minutes: 15
         run: |
+          $ProgressPreference = "SilentlyContinue"   # la barra di progresso rallenta i download
           $tools = Join-Path $env:RUNNER_TEMP "tools"
           New-Item -ItemType Directory -Force $tools | Out-Null
-
-          # ffmpeg/ffprobe: build "full" di gyan.dev, la stessa di winget Gyan.FFmpeg.
-          # L'hash pubblicato accanto all'archivio viene verificato prima di usarlo.
+          # Build "full" di gyan.dev, la stessa di winget Gyan.FFmpeg. L'hash pubblicato
+          # accanto all'archivio viene verificato prima di usarlo.
           $base = "https://www.gyan.dev/ffmpeg/builds"
           $archive = Join-Path $tools "ffmpeg.7z"
-          Invoke-WebRequest "$base/ffmpeg-release-full.7z" -OutFile $archive
-          $expected = (Invoke-WebRequest "$base/ffmpeg-release-full.7z.sha256").Content.Trim().Split()[0]
+          for ($i = 1; $i -le 3; $i++) {
+            try {
+              Invoke-WebRequest "$base/ffmpeg-release-full.7z" -OutFile $archive -TimeoutSec 240
+              $expected = (Invoke-WebRequest "$base/ffmpeg-release-full.7z.sha256" -TimeoutSec 60).Content.Trim().Split()[0]
+              break
+            } catch {
+              Write-Host "tentativo $i fallito: $_"
+              if ($i -eq 3) { throw }
+              Start-Sleep (10 * $i)
+            }
+          }
           $actual = (Get-FileHash $archive -Algorithm SHA256).Hash
           if ($actual -ne $expected.ToUpper()) { throw "SHA256 di ffmpeg non corrisponde ($actual != $expected)" }
           7z x $archive "-o$tools\ffmpeg" -y | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "estrazione di ffmpeg fallita" }
           $ffbin = (Get-ChildItem "$tools\ffmpeg" -Recurse -Filter ffmpeg.exe | Select-Object -First 1).DirectoryName
           if (-not $ffbin) { throw "ffmpeg.exe non trovato nell'archivio" }
           $ffbin >> $env:GITHUB_PATH
 
-          # pandoc: ultima release ufficiale (jgm/pandoc), zip x86_64.
-          gh release download --repo jgm/pandoc --pattern "pandoc-*-windows-x86_64.zip" --dir $tools
+      - name: pandoc
+        timeout-minutes: 10
+        run: |
+          $tools = Join-Path $env:RUNNER_TEMP "tools"
+          New-Item -ItemType Directory -Force $tools | Out-Null
+          # Ultima release ufficiale (jgm/pandoc), zip x86_64.
+          gh release download --repo jgm/pandoc --pattern "pandoc-*-windows-x86_64.zip" --dir $tools --clobber
           if ($LASTEXITCODE -ne 0) { throw "download di pandoc fallito" }
           $pzip = Get-ChildItem $tools -Filter "pandoc-*-windows-x86_64.zip" | Select-Object -First 1
           Expand-Archive $pzip.FullName -DestinationPath "$tools\pandoc" -Force
           $pbin = (Get-ChildItem "$tools\pandoc" -Recurse -Filter pandoc.exe | Select-Object -First 1).DirectoryName
+          if (-not $pbin) { throw "pandoc.exe non trovato nello zip" }
           $pbin >> $env:GITHUB_PATH
 
-          # LibreOffice: NON va nel bundle, serve solo perché il selftest copra anche
-          # le conversioni della modalità FULL. Inno Setup: compila l'installer.
-          choco install libreoffice-fresh innosetup -y --no-progress
+      # LibreOffice NON va nel bundle: serve solo perché il selftest copra anche le
+      # conversioni della modalità FULL. Inno Setup compila l'installer.
+      - name: LibreOffice and Inno Setup
+        timeout-minutes: 20
+        run: |
+          choco install libreoffice-fresh innosetup -y --no-progress --execution-timeout 900
           if ($LASTEXITCODE -ne 0) { throw "choco install fallito" }
 
       - name: Tool versions
