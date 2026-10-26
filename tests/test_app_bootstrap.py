@@ -149,3 +149,16 @@ def test_package_has_no_undefined_names():
     assert result.returncode == 0, (
         "Undefined names (stripped imports?):\n" + result.stdout + result.stderr
     )
+
+
+def test_app_icon_loads_every_size_from_png():
+    """L'icona di finestra/taskbar non deve dipendere dal plugin ICO di Qt:
+    nella build Windows risultava vuota e la taskbar mostrava quella generica."""
+    from PySide6.QtWidgets import QApplication
+
+    from converter.gui.app import _ICON_SIZES, _app_icon
+
+    QApplication.instance() or QApplication([])
+    icon = _app_icon()
+    assert not icon.isNull()
+    assert {size.width() for size in icon.availableSizes()} == set(_ICON_SIZES)

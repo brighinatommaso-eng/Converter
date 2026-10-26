@@ -5,7 +5,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QRunnable, QThreadPool
+from PySide6.QtCore import QRunnable, QSize, QThreadPool
 from PySide6.QtGui import QFontDatabase, QIcon
 from PySide6.QtWidgets import QApplication
 
@@ -49,14 +49,30 @@ def _load_fonts() -> str | None:
     return next(iter(exact or prefixed), None)
 
 
+_ICON_SIZES = (16, 20, 24, 32, 40, 48, 64, 96, 128, 256)
+
+
 def _app_icon() -> QIcon:
-    """Icona dell'app. Su Windows preferisce il .ico multi-risoluzione (title bar,
-    taskbar e Alt-Tab usano dimensioni diverse: il .ico le contiene tutte e non le
-    scala male). Fallback al PNG 256 se il .ico manca o su altre piattaforme."""
-    ico = _asset_path("converter.ico")
-    if sys.platform == "win32" and ico.exists():
-        return QIcon(str(ico))
-    return QIcon(str(_asset_path("converter_icon_256.png")))
+    """Icona dell'app costruita da PNG in più dimensioni (assets/icons).
+
+    Title bar, taskbar e Alt-Tab chiedono dimensioni diverse (16…256 px a seconda
+    del ridimensionamento dello schermo). Prima si caricava il .ico: le sue
+    immagini sono PNG compressi e Qt li legge solo tramite il plugin "qico";
+    nella build Windows l'icona risultava VUOTA senza errori e la taskbar
+    mostrava quella generica (sul file .exe si vedeva, perché lì l'icona è
+    incorporata da PyInstaller, non caricata da Qt). Il PNG è supportato da
+    QtGui senza plugin. Il .ico resta come ripiego."""
+    icon = QIcon()
+    for size in _ICON_SIZES:
+        png = _asset_path(f"icons/converter_{size}.png")
+        if png.exists():
+            icon.addFile(str(png), QSize(size, size))
+    if icon.isNull() or not icon.availableSizes():
+        for fallback in ("converter.ico", "converter_icon_256.png"):
+            candidate = QIcon(str(_asset_path(fallback)))
+            if not candidate.isNull() and candidate.availableSizes():
+                return candidate
+    return icon
 
 
 def _set_windows_app_id() -> None:
