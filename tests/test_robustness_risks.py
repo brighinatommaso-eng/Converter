@@ -163,3 +163,20 @@ def test_gpl_license_texts_ship_with_the_build():
         assert first_line in text[:200], name
     spec = (root / "converter.spec").read_text(encoding="utf-8")
     assert 'shutil.copytree("licenses"' in spec and "THIRD_PARTY_NOTICES.md" in spec
+
+
+def test_spec_and_selftest_agree_on_the_excluded_modules():
+    """Lo spec esclude dal bundle e il selftest verifica: i due elenchi devono coincidere."""
+    import ast
+
+    import converter_app
+
+    root = Path(__file__).resolve().parent.parent
+    tree = ast.parse((root / "converter.spec").read_text(encoding="utf-8"))
+    spec_list = next(ast.literal_eval(node.value) for node in ast.walk(tree)
+                     if isinstance(node, ast.Assign)
+                     and getattr(node.targets[0], "id", "") == "UNUSED_OPTIONAL_MODULES")
+    assert tuple(spec_list) == converter_app._UNUSED_OPTIONAL_MODULES
+    # Nessun modulo usato davvero da Converter tra gli esclusi.
+    assert not {"pdfminer", "docx", "lxml", "PIL", "pandas", "numpy", "trimesh",
+                "cryptography", "yaml", "openpyxl", "odf"} & set(spec_list)
