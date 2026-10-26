@@ -9,14 +9,20 @@ batch non ferma gli altri.
 from __future__ import annotations
 
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from . import registry
-from .job import ConversionJob, ConversionResult, ProgressCallback, ProgressEvent
+from .job import ConversionJob, ConversionResult, ProgressCallback, ProgressEvent, cancelled_result
 
 
 def run_job(job: ConversionJob, progress: ProgressCallback | None = None) -> ConversionResult:
     cb: ProgressCallback = progress or (lambda _evt: None)
+
+    # Annulla premuto mentre il job era ancora in coda nel pool: non parte affatto.
+    # Senza questo controllo solo ffmpeg rispettava l'annullamento e i job in
+    # attesa (immagini, dati, documenti, 3D) venivano eseguiti tutti comunque.
+    if job.cancel.cancelled:
+        return cancelled_result()
 
     conv = registry.resolve(job.src_format, job.dst_format)
     if conv is None:
@@ -50,7 +56,10 @@ def run_job(job: ConversionJob, progress: ProgressCallback | None = None) -> Con
     try:
         cb(ProgressEvent(0.0, "Starting…"))
         result = conv.convert(job, cb)
-        cb(ProgressEvent(1.0, "Done"))
+        if not result.ok and job.cancel.cancelled:
+            result.cancelled = True     # es. ffmpeg ucciso dall'Annulla
+        if result.ok:
+            cb(ProgressEvent(1.0, "Done"))
         return result
     except Exception as exc:  # rete di sicurezza: nessuna eccezione esce da qui
         return ConversionResult(ok=False, error=f"{type(exc).__name__}: {exc}")
@@ -66,7 +75,9 @@ def run_batch(
     results: list[ConversionResult] = [None] * len(jobs)  # type: ignore[list-item]
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         futures = {pool.submit(run_job, job): idx for idx, job in enumerate(jobs)}
-        for future in futures:
+        # as_completed: on_result arriva quando un job FINISCE, non in ordine di
+        # invio (prima un job lento in testa tratteneva tutti i risultati pronti).
+        for future in as_completed(futures):
             idx = futures[future]
             results[idx] = future.result()
             if on_result:

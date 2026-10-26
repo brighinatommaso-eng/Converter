@@ -148,3 +148,39 @@ def test_unknown_binary(tmp_path):
     path.write_bytes(b"\x00\x01\x02\x03not a known format")
     result = detect(path)
     assert result.format_id is None or result.confidence <= 0.3
+
+
+# --- Rilevamento testo-contro-testo e firme deboli (review 2026-10-26) ---------
+
+def test_csv_starting_with_bm_is_not_a_bitmap(tmp_path):
+    """'BM' da solo non è una firma: un CSV "BMI,age" diventava un'immagine."""
+    path = tmp_path / "bmi.csv"
+    path.write_text("BMI,age\n22.5,30\n24.1,41\n", encoding="utf-8")
+    assert detect(path).format_id == "csv"
+
+
+def test_real_bitmaps_are_still_detected(tmp_path):
+    for mode in ("RGB", "RGBA", "1", "P"):
+        path = tmp_path / f"x_{mode}.bmp"
+        Image.new(mode, (5, 5)).save(path)
+        assert detect(path).format_id == "bmp", mode
+
+
+def test_markdown_with_lists_and_key_values_stays_markdown(tmp_path):
+    """Il README del progetto veniva rilevato come YAML (categoria dati)."""
+    path = tmp_path / "README.md"
+    path.write_text("# Title\n\nAuthor: Tom\n\n- one\n- two\n", encoding="utf-8")
+    assert detect(path).format_id == "md"
+
+
+def test_extension_does_not_override_strong_content(tmp_path):
+    """L'estensione vince solo sugli sniff deboli: un JSON vero resta JSON."""
+    path = tmp_path / "data.txt"
+    path.write_text('{"a": 1}', encoding="utf-8")
+    assert detect(path).format_id == "json"
+
+
+def test_semicolon_csv_is_detected_as_csv(tmp_path):
+    path = tmp_path / "export.dat"
+    path.write_text("nome;prezzo\nmela;1,50\npera;2,00\n", encoding="utf-8")
+    assert detect(path).format_id == "csv"

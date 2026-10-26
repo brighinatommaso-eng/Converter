@@ -29,13 +29,14 @@ from ..core import deps, engine
 from ..core.base import Converter
 from ..core.deps import DependencyStatus, libreoffice_install_hint
 from ..core.formats import primary_ext
-from ..core.job import ConversionJob, ConversionResult, ProgressCallback, ProgressEvent
+from ..core.job import ConversionJob, ConversionResult, ProgressCallback, ProgressEvent, cancelled_result
 from ..core.options import BoolOption, ChoiceOption, Option
 from ..core.quality import QualityVerdict, lossy, unsupported
 from ..core.registry import register
 from . import _ocr
 from ._libreoffice import DEFAULT_TIMEOUT, run_convert
-from .docmodel import read_docx, read_pdf, write_docx, write_html, write_markdown, write_text
+from .docmodel import PageBreak, read_docx, read_pdf, write_docx, write_html, write_markdown, write_text
+from .docmodel.writers import WriteReport
 
 # Target di questo converter. `pdf` come target resta a LibreOffice (export fedele
 # dal documento strutturato), non si rigenera dall'IR.
@@ -185,6 +186,8 @@ class TextDocConverter(Converter):
                     needs_ocr = not _ocr.has_extractable_text(job.src_path)
                 except Exception as exc:
                     return ConversionResult(ok=False, error=f"Could not read this PDF: {exc}")
+                if job.cancel.cancelled:
+                    return cancelled_result()
                 if needs_ocr:
                     if not _ocr.available():
                         return ConversionResult(ok=False, error=_ocr.SCANNED_MESSAGE)
@@ -194,11 +197,17 @@ class TextDocConverter(Converter):
                     if not ok:
                         return ConversionResult(ok=False, error=error)
                     source = ocr_pdf
+                    if job.cancel.cancelled:
+                        return cancelled_result()
                 progress(ProgressEvent(0.4, "Reconstructing the document…"))
                 try:
                     document = read_pdf(source)
                 except ValueError as exc:
                     return ConversionResult(ok=False, error=str(exc))
+                if not any(not isinstance(block, PageBreak) for block in document.blocks):
+                    # Mai un documento vuoto che sembra riuscito.
+                    return ConversionResult(
+                        ok=False, error="This PDF contains no text or images to convert.")
             else:
                 progress(ProgressEvent(0.3, "Reading document…"))
                 try:
@@ -206,9 +215,13 @@ class TextDocConverter(Converter):
                 except ValueError as exc:
                     return ConversionResult(ok=False, error=str(exc))
 
+            # Annullamento cooperativo tra le fasi: la lettura pdfminer non si può
+            # interrompere a metà, ma il lavoro successivo non parte.
+            if job.cancel.cancelled:
+                return cancelled_result()
             progress(ProgressEvent(0.75, "Writing " + job.dst_format.upper() + "…"))
             try:
-                self._write(document, job, tmp, layout, page_breaks, progress)
+                report = self._write(document, job, tmp, layout, page_breaks, progress)
             except Exception as exc:  # scrittore: errore pulito, mai stacktrace
                 job.output_path.unlink(missing_ok=True)
                 return ConversionResult(ok=False,
@@ -218,29 +231,32 @@ class TextDocConverter(Converter):
             return ConversionResult(ok=False, error="No output was produced.")
         size = job.output_path.stat().st_size
         progress(ProgressEvent(1.0, "Done"))
+        verdict = self.verdict(job.src_format, job.dst_format, options)
+        if report.dropped_images:
+            # Onestà a runtime: un'immagine in un formato che il target non sa
+            # mostrare (EMF/WMF, JBIG2…) e che Pillow non riesce a ricodificare.
+            verdict = lossy(f"{verdict.reason} {report.dropped_images} image(s) in a format "
+                            f"{job.dst_format.upper()} cannot show were left out.")
         return ConversionResult(ok=True, output_path=job.output_path, output_size=size,
-                                verdict=self.verdict(job.src_format, job.dst_format, options))
+                                verdict=verdict)
 
     def _write(self, document, job: ConversionJob, tmp: Path, layout: str,
-               page_breaks: bool, progress: ProgressCallback) -> None:
+               page_breaks: bool, progress: ProgressCallback) -> WriteReport:
         if job.dst_format == "docx":
-            write_docx(document, job.output_path, layout=layout, page_breaks=page_breaks)
-            return
+            return write_docx(document, job.output_path, layout=layout, page_breaks=page_breaks)
         if job.dst_format == "md":
-            write_markdown(document, job.output_path)
-            return
+            return write_markdown(document, job.output_path)
         if job.dst_format == "txt":
-            write_text(document, job.output_path)
-            return
+            return write_text(document, job.output_path)
         if job.dst_format == "html":
-            write_html(document, job.output_path)
-            return
+            return write_html(document, job.output_path)
         # odt/rtf: docx intermedio + secondo salto LibreOffice (catena interna).
         intermediate = tmp / (job.src_path.stem + ".docx")
-        write_docx(document, intermediate, layout=layout, page_breaks=page_breaks)
+        report = write_docx(document, intermediate, layout=layout, page_breaks=page_breaks)
         progress(ProgressEvent(0.85, "Converting with LibreOffice…"))
         ok, payload = run_convert(intermediate, primary_ext(job.dst_format), tmp,
                                   timeout=DEFAULT_TIMEOUT)
         if not ok:
             raise RuntimeError(payload)
         shutil.move(str(payload), str(job.output_path))
+        return report

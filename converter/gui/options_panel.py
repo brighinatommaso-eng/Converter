@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -33,14 +33,42 @@ from .theme import badge_color
 from .util import human_size
 
 
+class _EstimateSignals(QObject):
+    done = Signal(int, object, object)    # (token, item, stima in byte | None)
+
+
+class _EstimateTask(QRunnable):
+    """Esegue Converter.estimate_size in un thread del pool delle stime."""
+
+    def __init__(self, conv, job: ConversionJob, token: int, item, signals) -> None:
+        super().__init__()
+        self._conv, self._job, self._token, self._item = conv, job, token, item
+        self._signals = signals
+
+    def run(self) -> None:
+        try:
+            est = self._conv.estimate_size(self._job)
+        except Exception:
+            est = None
+        self._signals.done.emit(self._token, self._item, est)
+
+
 class OptionsPanel(QWidget):
     """Editor delle impostazioni per la riga selezionata."""
 
     changed = Signal()  # emesso quando target/opzioni cambiano (per aggiornare la tabella)
+    estimate_ready = Signal()  # la stima asincrona della dimensione è arrivata
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._item: QueueItem | None = None
+        # Stime in un pool proprio (1 thread): non si accodano dietro le
+        # conversioni del pool globale e non si sovrappongono tra loro.
+        self._est_pool = QThreadPool(self)
+        self._est_pool.setMaxThreadCount(1)
+        self._est_token = 0
+        self._est_signals = _EstimateSignals()
+        self._est_signals.done.connect(self._on_estimate)
         self._building = False
         # L'errore di validazione si STILA in rosso solo dopo che un campo ha
         # perso il focus (o alla pressione di Convert): così digitare "0:3" verso
@@ -313,23 +341,31 @@ class OptionsPanel(QWidget):
                 f'font-weight: 600; color: {badge_color(verdict.level)};')
             self._reason.setText(verdict.reason)
 
-        # Stima dimensione di output (best-effort).
-        est = None
+        # Stima dimensione di output (best-effort) FUORI dal thread UI: per
+        # l'audio lancia ffprobe (fino a 15 s su un file di rete) e prima lo
+        # faceva a ogni scatto di uno slider, congelando la finestra.
+        self._est_token += 1
+        item.est_size = None
+        self._output.setText(f"Source size {human_size(item.src_size)}")
         if conv:
             dummy = ConversionJob(
                 src_path=item.src_path, src_format=item.detected.format_id,
                 dst_format=item.dst_format, output_path=Path("dummy"),
                 options=dict(item.options), strip_metadata=item.strip_metadata,
             )
-            try:
-                est = conv.estimate_size(dummy)
-            except Exception:
-                est = None
+            self._est_pool.start(_EstimateTask(conv, dummy, self._est_token, item,
+                                               self._est_signals))
+
+        self._update_validation(conv, item)
+
+    def _on_estimate(self, token: int, item: QueueItem, est) -> None:
+        """Risultato della stima: vale solo se nel frattempo nulla è cambiato."""
+        if token != self._est_token or item is not self._item:
+            return
         item.est_size = est
         est_text = f"  ·  estimated output ~{human_size(est)}" if est else ""
         self._output.setText(f"Source size {human_size(item.src_size)}{est_text}")
-
-        self._update_validation(conv, item)
+        self.estimate_ready.emit()
 
     def _update_validation(self, conv, item) -> None:
         """Validazione strutturale (senza durata). Il messaggio rosso compare

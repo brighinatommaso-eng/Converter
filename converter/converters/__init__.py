@@ -18,6 +18,7 @@ from . import (  # noqa: F401,E402  (import per side-effect: registrazione)
     markup,
     mesh3d,
     pdf,
+    plaintext,
     rtf,
     textdoc,
     video,

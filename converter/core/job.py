@@ -51,6 +51,13 @@ class ConversionResult:
     output_size: int | None = None
     verdict: QualityVerdict | None = None
     error: str | None = None
+    # True se il job si è fermato per un Annulla dell'utente (non è un errore).
+    cancelled: bool = False
+
+
+def cancelled_result() -> ConversionResult:
+    """Esito di un job fermato dall'Annulla dell'utente (non un errore)."""
+    return ConversionResult(ok=False, error="Cancelled.", cancelled=True)
 
 
 @dataclass
