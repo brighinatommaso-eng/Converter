@@ -61,6 +61,19 @@ _LAYOUT_HELP = (
 )
 
 
+def _pdf_error(exc: Exception) -> str:
+    """Messaggio leggibile per un PDF che pdfminer rifiuta.
+
+    L'eccezione della password di pdfminer non ha testo: il messaggio era
+    "Could not read this PDF: " seguito dal nulla."""
+    from pdfminer.pdfdocument import PDFEncryptionError, PDFPasswordIncorrect
+
+    if isinstance(exc, (PDFPasswordIncorrect, PDFEncryptionError)):
+        return "Could not read this PDF: it is password-protected."
+    detail = str(exc).strip() or type(exc).__name__
+    return f"Could not read this PDF: {detail}"
+
+
 @register
 class TextDocConverter(Converter):
     category = "document"
@@ -167,7 +180,7 @@ class TextDocConverter(Converter):
         except Exception as exc:
             # PDF malformato/cifrato: pdfminer solleva. Messaggio pulito, mai
             # uno stacktrace (run_job mostra questo testo all'utente).
-            return f"Could not read this PDF: {exc}"
+            return _pdf_error(exc)
         # Scansione: con la catena OCR presente passa (l'OCR avviene in convert()),
         # senza il rifiuto resta — degradante, mai un documento vuoto.
         return None if _ocr.available() else _ocr.SCANNED_MESSAGE
@@ -185,7 +198,7 @@ class TextDocConverter(Converter):
                 try:
                     needs_ocr = not _ocr.has_extractable_text(job.src_path)
                 except Exception as exc:
-                    return ConversionResult(ok=False, error=f"Could not read this PDF: {exc}")
+                    return ConversionResult(ok=False, error=_pdf_error(exc))
                 if job.cancel.cancelled:
                     return cancelled_result()
                 if needs_ocr:
@@ -232,6 +245,13 @@ class TextDocConverter(Converter):
         size = job.output_path.stat().st_size
         progress(ProgressEvent(1.0, "Done"))
         verdict = self.verdict(job.src_format, job.dst_format, options)
+        if document.skipped_pages:
+            # PDF danneggiato: il resto è stato letto, ma quelle pagine mancano.
+            verdict = lossy(f"{verdict.reason} {document.skipped_pages} damaged page(s) could "
+                            f"not be read and are missing from the output.")
+        if document.undecoded_chars:
+            verdict = lossy(f"{verdict.reason} {document.undecoded_chars} character(s) use a "
+                            f"font without a Unicode mapping and are shown as �.")
         if report.dropped_images:
             # Onestà a runtime: un'immagine in un formato che il target non sa
             # mostrare (EMF/WMF, JBIG2…) e che Pillow non riesce a ricodificare.

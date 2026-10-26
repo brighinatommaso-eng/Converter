@@ -1322,3 +1322,223 @@ def test_scan_check_is_computed_once_per_file(tmp_path, monkeypatch):
     result = run_job(_job(pdf, "txt", tmp_path / "doc.txt"))   # validate + convert
     assert result.ok, result.error
     assert len(calls) == 1
+
+
+# --- Corpus reale (Unstructured, 37 PDF): robustezza e tabelle --------------
+
+def _write_raw_pdf(path: Path, objs: list[bytes], trailer_extra: bytes = b"") -> None:
+    """PDF scritto a mano da una lista di oggetti (1 = Catalog), xref corretta."""
+    out = bytearray(b"%PDF-1.4\n")
+    offsets = []
+    for i, body in enumerate(objs, start=1):
+        offsets.append(len(out))
+        out += f"{i} 0 obj\n".encode() + body + b"\nendobj\n"
+    xref_pos = len(out)
+    out += b"xref\n0 " + str(len(objs) + 1).encode() + b"\n0000000000 65535 f \n"
+    for off in offsets:
+        out += f"{off:010d} 00000 n \n".encode()
+    out += (b"trailer\n<< /Size " + str(len(objs) + 1).encode() + b" /Root 1 0 R "
+            + trailer_extra + b">>\nstartxref\n" + str(xref_pos).encode() + b"\n%%EOF\n")
+    path.write_bytes(bytes(out))
+
+
+def _text_page_objs(resources_extra: bytes = b"") -> list[bytes]:
+    content = b"BT /F1 12 Tf 72 700 Td (Readable body text despite the damage) Tj ET"
+    return [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        (b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R "
+         b"/Resources << /Font << /F1 5 0 R >> " + resources_extra + b">> >>"),
+        b"<< /Length " + str(len(content)).encode() + b" >>\nstream\n" + content + b"\nendstream",
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+    ]
+
+
+def test_pdf_with_a_malformed_info_dictionary_is_still_read(tmp_path):
+    """/Info è facoltativo: un titolo LaTeX malformato rifiutava tutto il file."""
+    from converter.converters.docmodel import read_pdf
+
+    objs = _text_page_objs() + [b"<< /Producer (pdfTeX) /Broken /Title /Words /Author (x) >>"]
+    pdf = tmp_path / "bad-info.pdf"
+    _write_raw_pdf(pdf, objs, b"/Info 6 0 R ")
+    document = read_pdf(pdf)
+    assert any("Readable body text" in block.text for block in document.blocks
+               if isinstance(block, Paragraph))
+    assert _ocr.has_extractable_text(pdf) is True
+
+
+def test_pdf_with_a_broken_icc_colour_space_is_still_read(tmp_path):
+    """Uno spazio colore ICCBased senza /N faceva fallire l'intera pagina."""
+    from converter.converters.docmodel import read_pdf
+
+    objs = _text_page_objs(b"/ColorSpace << /CS0 [/ICCBased 6 0 R] >> ")
+    objs.append(b"<< /Length 0 >>\nstream\n\nendstream")
+    pdf = tmp_path / "bad-icc.pdf"
+    _write_raw_pdf(pdf, objs)
+    document = read_pdf(pdf)
+    assert any("Readable body text" in block.text for block in document.blocks
+               if isinstance(block, Paragraph))
+
+
+def test_an_unreadable_page_is_skipped_and_declared(tmp_path, monkeypatch):
+    from pdfminer.pdfinterp import PDFPageInterpreter
+
+    original = PDFPageInterpreter.process_page
+
+    def flaky(self, page):
+        # Danneggia SOLO la seconda pagina, in ogni lettura (anche il controllo scansione).
+        if b"Second page" in b"".join(stream.get_data() for stream in page.contents):
+            raise ValueError("damaged content stream")
+        return original(self, page)
+
+    monkeypatch.setattr(PDFPageInterpreter, "process_page", flaky)
+    _mock_ocr_chain(monkeypatch, present=False)
+    pdf = tmp_path / "two.pdf"
+    _write_two_page_text_pdf(pdf)
+    out = tmp_path / "two.md"
+    result = run_job(_job(pdf, "md", out))
+    assert result.ok, result.error
+    assert result.verdict.is_lossy and "1 damaged page" in result.verdict.reason
+
+
+def _write_two_page_text_pdf(path: Path) -> None:
+    pages = []
+    for text in ("First page text here", "Second page text here"):
+        content = f"BT /F1 12 Tf 72 700 Td ({text}) Tj ET".encode("latin-1")
+        pages.append(content)
+    objs = [b"<< /Type /Catalog /Pages 2 0 R >>",
+            b"<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>"]
+    for index in range(2):
+        objs.append(b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents "
+                    + str(5 + index).encode() + b" 0 R /Resources << /Font << /F1 7 0 R >> >> >>")
+    for content in pages:
+        objs.append(b"<< /Length " + str(len(content)).encode() + b" >>\nstream\n"
+                    + content + b"\nendstream")
+    objs.append(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")
+    _write_raw_pdf(path, objs)
+
+
+def test_undecodable_glyphs_become_the_replacement_character():
+    from converter.converters.docmodel.pdfreader import _clean_text
+
+    # Un segno meno senza mappa Unicode: toglierlo cambierebbe −0,94 in 0,94.
+    assert _clean_text("(cid:3) 0.9393") == "� 0.9393"
+
+
+def test_aligned_table_keeps_multi_line_cells_whole(tmp_path):
+    """Una descrizione che va a capo spezzava la tabella in frammenti."""
+    from converter.converters.docmodel import read_pdf
+    from converter.converters.docmodel.types import Table
+
+    items = [(72.0, 700.0, "LINE"), (160.0, 700.0, "POSITION"), (260.0, 700.0, "DESCRIPTION")]
+    items += [(72.0, 680.0, "1"), (160.0, 680.0, "01-05"), (260.0, 680.0, "Command Code (required)")]
+    items += [(72.0, 666.0, "1"), (160.0, 666.0, "06"), (260.0, 666.0, "Definer Code (required):")]
+    items += [(270.0, 654.0, "A = adjustments"), (270.0, 642.0, "M = IRC 965")]
+    items += [(72.0, 628.0, "1"), (160.0, 628.0, "07-16"), (260.0, 628.0, "EIN (required)")]
+    items += [(72.0, 614.0, "1"), (160.0, 614.0, "17"), (260.0, 614.0, "Display Source Code")]
+    pdf = tmp_path / "multiline.pdf"
+    _write_placed_text_pdf(pdf, items)
+    document = read_pdf(pdf)
+    tables = [block for block in document.blocks if isinstance(block, Table)]
+    assert len(tables) == 1
+    grid = tables[0].text_grid()
+    assert grid[2] == ["1", "06", "Definer Code (required): A = adjustments M = IRC 965"]
+    assert len(grid) == 5
+    assert not [block for block in document.blocks
+                if isinstance(block, Paragraph) and "adjustments" in block.text]
+
+
+def test_aligned_table_keeps_merged_row_labels_in_their_own_column(tmp_path):
+    """"DP" centrato tra due righe (etichetta unita) spezzava la tabella."""
+    from converter.converters.docmodel import read_pdf
+    from converter.converters.docmodel.types import Table
+
+    items = []
+    for label, top in (("DP", 700.0), ("L2", 666.0)):
+        items += [(120.0, top, "NLL"), (170.0, top, "44.9"), (210.0, top, "66.8"), (250.0, top, "78.1")]
+        items += [(80.0, top - 6.8, label)]
+        items += [(120.0, top - 13.6, "Triplet"), (170.0, top - 13.6, "41.6"),
+                  (210.0, top - 13.6, "65.0"), (250.0, top - 13.6, "77.2")]
+    pdf = tmp_path / "labels.pdf"
+    _write_placed_text_pdf(pdf, items)
+    tables = [block for block in read_pdf(pdf).blocks if isinstance(block, Table)]
+    assert len(tables) == 1
+    assert [row[:2] for row in tables[0].text_grid()] == [
+        ["DP", "NLL"], ["", "Triplet"], ["L2", "NLL"], ["", "Triplet"]]
+
+
+def test_table_does_not_swallow_the_margin_heading_prose_below_it(tmp_path):
+    """Titolo di sezione nel margine + prosa a destra hanno due "celle" per riga,
+    ma non sulle colonne della tabella: non sono righe della tabella."""
+    from converter.converters.docmodel import read_pdf
+    from converter.converters.docmodel.types import Table
+
+    items = []
+    for row, top in enumerate((700.0, 681.0, 662.0)):
+        items += [(226.0, top, "WZ#"[row]), (271.0, top, f"{row + 1}.5"), (317.0, top, f"{row}0"),
+                  (362.0, top, f"{row + 4}.25")]
+    items += [(72.0, 611.0, "2.3.59.7"), (220.0, 611.0, "(1) Abbreviated formats permit the user")]
+    items += [(72.0, 599.0, "(01-17-2010)"), (220.0, 599.0, "the previous command for instance")]
+    items += [(72.0, 587.0, "Command Code"), (220.0, 587.0, "period for the same TIN and MFT")]
+    pdf = tmp_path / "margin.pdf"
+    _write_placed_text_pdf(pdf, items)
+    document = read_pdf(pdf)
+    tables = [block for block in document.blocks if isinstance(block, Table)]
+    assert len(tables) == 1 and len(tables[0].rows) == 3
+    assert not any("Abbreviated" in cell for row in tables[0].text_grid() for cell in row)
+
+
+@pytest.mark.parametrize("black_is_1", [False, True])
+def test_ccitt_images_decode_fast_and_correctly(tmp_path, black_is_1):
+    """La decodifica CCITT in Python puro costava ~6 s per pagina scansionata."""
+    import io
+
+    from pdfminer.high_level import extract_pages
+    from pdfminer.layout import LTImage
+    from PIL import Image, ImageDraw
+
+    from converter.converters.docmodel.pdfreader import _ccitt_image
+
+    source = Image.new("1", (64, 32), 1)
+    ImageDraw.Draw(source).rectangle((8, 8, 40, 20), fill=0)
+    tiff = tmp_path / "g4.tif"
+    source.save(tiff, compression="group4")
+    with Image.open(tiff) as image:
+        offset, length = image.tag_v2[273][0], image.tag_v2[279][0]
+    data = tiff.read_bytes()[offset:offset + length]
+    flag = b"true" if black_is_1 else b"false"
+    content = b"q 64 0 0 32 72 700 cm /Im0 Do Q"
+    objs = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        (b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R "
+         b"/Resources << /XObject << /Im0 5 0 R >> >> >>"),
+        b"<< /Length " + str(len(content)).encode() + b" >>\nstream\n" + content + b"\nendstream",
+        (b"<< /Type /XObject /Subtype /Image /Width 64 /Height 32 /ColorSpace /DeviceGray "
+         b"/BitsPerComponent 1 /Filter /CCITTFaxDecode /DecodeParms << /K -1 /Columns 64 "
+         b"/Rows 32 /BlackIs1 " + flag + b" >> /Length " + str(len(data)).encode()
+         + b" >>\nstream\n" + data + b"\nendstream"),
+    ]
+    pdf = tmp_path / "fax.pdf"
+    _write_raw_pdf(pdf, objs)
+
+    def find(node):
+        if isinstance(node, LTImage):
+            return node
+        for child in getattr(node, "__iter__", lambda: [])():
+            found = find(child)
+            if found is not None:
+                return found
+        return None
+
+    node = find(next(iter(extract_pages(str(pdf)))))
+    fast = _ccitt_image(node)
+    assert fast is not None
+    # Atteso = ciò che mostra un visualizzatore: con BlackIs1 false i "run neri"
+    # sono neri (l'immagine d'origine); con true i bit si invertono. (L'export
+    # BMP di pdfminer inverte i colori CCITT: non è un riferimento affidabile.)
+    from PIL import ImageOps
+
+    expected = source.convert("L") if not black_is_1 else ImageOps.invert(source.convert("L"))
+    with Image.open(io.BytesIO(fast)) as ours:
+        assert ours.convert("L").tobytes() == expected.convert("L").tobytes()

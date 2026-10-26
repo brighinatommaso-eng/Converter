@@ -61,12 +61,13 @@ def _digest(document: Document) -> dict:
                 entry = {"type": "body", "text": _normalise(block.text)}
             blocks.append(entry)
         elif isinstance(block, ListBlock):
-            blocks.append({
-                "type": "list",
-                "ordered": block.ordered,
-                "items": [{"level": item.level, "text": _normalise(item.paragraph.text)}
-                          for item in block.items],
-            })
+            items = []
+            for item in block.items:
+                entry = {"level": item.level, "text": _normalise(item.paragraph.text)}
+                if item.is_ordered(block) != block.ordered:
+                    entry["ordered"] = item.is_ordered(block)   # voce mista (es. punto sotto 1.)
+                items.append(entry)
+            blocks.append({"type": "list", "ordered": block.ordered, "items": items})
         elif isinstance(block, Table):
             blocks.append({
                 "type": "table",
@@ -77,7 +78,14 @@ def _digest(document: Document) -> dict:
                            "height_pt": round(block.height_pt, 1)})
         elif isinstance(block, PageBreak):
             blocks.append({"type": "page_break"})
-    return {"title": _normalise(document.title), "blocks": blocks}
+    digest = {"title": _normalise(document.title), "blocks": blocks}
+    # Perdite dichiarate nel verdetto: fanno parte della misura (un PDF che torna
+    # leggibile, o un font che si decodifica, deve cambiare la baseline).
+    if document.skipped_pages:
+        digest["skipped_pages"] = document.skipped_pages
+    if document.undecoded_chars:
+        digest["undecoded_chars"] = document.undecoded_chars
+    return digest
 
 
 def _sources() -> list[Path]:
@@ -143,11 +151,14 @@ def test_digest_keeps_the_structure_that_matters():
         blocks=[
             heading,
             paragraph,
-            ListBlock(ordered=False, items=[ListItem("•", 1, paragraph)]),
+            ListBlock(ordered=False, items=[ListItem("•", 1, paragraph),
+                                            ListItem("1", 2, paragraph, ordered=True)]),
             table,
             ImageBlock(data=b"x", width_pt=10.0, height_pt=20.0),
             PageBreak(),
         ],
+        skipped_pages=1,
+        undecoded_chars=2,
     )
     assert _digest(document) == {
         "title": "Report",
@@ -155,9 +166,12 @@ def test_digest_keeps_the_structure_that_matters():
             {"type": "heading", "text": "1. Intro", "level": 1},
             {"type": "body", "text": "Body"},
             {"type": "list", "ordered": False,
-             "items": [{"level": 1, "text": "Body"}]},
+             "items": [{"level": 1, "text": "Body"},
+                       {"level": 2, "text": "Body", "ordered": True}]},
             {"type": "table", "rows": [["Body", "Body"]]},
             {"type": "image", "width_pt": 10.0, "height_pt": 20.0},
             {"type": "page_break"},
         ],
+        "skipped_pages": 1,
+        "undecoded_chars": 2,
     }

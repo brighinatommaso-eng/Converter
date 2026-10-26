@@ -29,6 +29,15 @@ def _real_tool(name):
     return real if os.path.exists(real) else found
 
 
+# Vedi l'elenco in Analysis(excludes=...). Condiviso col selftest dell'exe
+# (converter_app._UNUSED_OPTIONAL_MODULES), che verifica che non siano nel bundle.
+UNUSED_OPTIONAL_MODULES = [
+    "pygame", "sqlalchemy", "botocore", "boto3", "s3transfer", "psycopg2", "pydantic",
+    "pydantic_core", "rich", "jinja2", "markupsafe", "fsspec", "anyio", "pygments", "bcrypt",
+    "requests", "urllib3", "certifi", "pyglet", "networkx", "shapely", "rtree", "psutil",
+    "pkg_resources", "setuptools",
+]
+
 binaries = []
 # pandoc = motore markup PORTABLE (md/html/epub/docx/odt). Bundlato come ffmpeg in
 # _internal/bin, dove deps._locate("pandoc") lo cerca per primo. GPL ma è un binario
@@ -93,6 +102,11 @@ a = Analysis(
         # pdf2docx e img2pdf non devono finire nel bundle nemmeno come dipendenze
         # opzionali di un altro pacchetto; OCRmyPDF/pikepdf restano esterni.
         "fitz", "pymupdf", "pdf2docx", "img2pdf", "ocrmypdf", "pikepdf",
+        # Dipendenze OPZIONALI di pandas/trimesh/fsspec presenti nel Python di build
+        # ma mai importate da Converter (verificato: suite completa + --selftest con
+        # questi moduli bloccati all'import). Senza escluderle PyInstaller le
+        # raccoglie dalle importazioni opzionali e il bundle ingrassa.
+        *UNUSED_OPTIONAL_MODULES,
     ],
     noarchive=False,
     optimize=0,
