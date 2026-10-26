@@ -43,7 +43,7 @@ jobs:
         run: |
           sudo apt-get update -q
           sudo apt-get install -y -q --no-install-recommends \
-            ffmpeg pandoc libreoffice-writer fonts-dejavu-core \
+            ffmpeg pandoc libreoffice-writer fonts-dejavu-core fonts-crosextra-carlito \
             libegl1 libgl1 libxkbcommon0 libxkbcommon-x11-0 libfontconfig1 libdbus-1-3
       - run: pip install -r requirements.txt "pytest>=8.0" "ruff>=0.6" "lxml>=5"
       - name: Tests
