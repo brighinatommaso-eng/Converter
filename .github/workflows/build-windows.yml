@@ -112,20 +112,30 @@ jobs:
           if (-not $pbin) { throw "pandoc.exe non trovato nello zip" }
           $pbin >> $env:GITHUB_PATH
 
-      # LibreOffice NON va nel bundle: serve solo perché il selftest copra anche le
-      # conversioni della modalità FULL. Inno Setup compila l'installer.
-      - name: LibreOffice and Inno Setup
-        timeout-minutes: 20
+      - name: Inno Setup
+        timeout-minutes: 10
         run: |
-          choco install libreoffice-fresh innosetup -y --no-progress --execution-timeout 900
-          if ($LASTEXITCODE -ne 0) { throw "choco install fallito" }
+          choco install innosetup -y --no-progress
+          if ($LASTEXITCODE -ne 0) { throw "choco install innosetup fallito" }
+
+      # LibreOffice NON va nel bundle: serve solo perché il selftest copra anche le
+      # conversioni della modalità FULL. È best-effort: il suo MSI (~360 MB) arriva da
+      # un mirror di documentfoundation.org che a volte va a 170 KB/s (35 min). Senza,
+      # il selftest segna SKIP quei controlli e il passo dopo lo dichiara con un warning.
+      - name: LibreOffice (best-effort)
+        timeout-minutes: 15
+        continue-on-error: true
+        run: |
+          choco install libreoffice-fresh -y --no-progress
+          if ($LASTEXITCODE -ne 0) { throw "choco install libreoffice-fresh fallito" }
 
       - name: Tool versions
         run: |
           ffmpeg -hide_banner -version | Select-Object -First 1
           pandoc --version | Select-Object -First 1
           $so = Get-Item "C:\Program Files\LibreOffice\program\soffice.exe" -ErrorAction SilentlyContinue
-          if ($so) { "LibreOffice " + $so.VersionInfo.ProductVersion } else { "LibreOffice: not in the default folder" }
+          if ($so) { "LibreOffice " + $so.VersionInfo.ProductVersion }
+          else { "::warning::LibreOffice non installato: il selftest salta i controlli della modalità FULL" }
           exit 0   # pipe chiusa da Select-Object: il codice d'uscita di pandoc qui non conta
 
       - name: PyInstaller
