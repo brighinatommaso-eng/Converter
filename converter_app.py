@@ -411,7 +411,28 @@ def _selftest_honesty_checks(d, ff, gen_media) -> dict[str, object]:
         return True if not missing else f"FAIL missing {missing}"
 
     check("license texts next to exe", licenses)
+
+    # --- Bundle snello: le dipendenze opzionali escluse non devono esserci ------
+    def no_unused_modules():
+        if not getattr(sys, "frozen", False):
+            return "SKIP not frozen"
+        import importlib.util
+
+        found = [name for name in _UNUSED_OPTIONAL_MODULES
+                 if importlib.util.find_spec(name) is not None]
+        return True if not found else f"FAIL bundled anyway: {found}"
+
+    check("bundle free of unused optional modules", no_unused_modules)
     return out
+
+
+# Stesso elenco di converter.spec (UNUSED_OPTIONAL_MODULES): escluse dal bundle.
+_UNUSED_OPTIONAL_MODULES = (
+    "pygame", "sqlalchemy", "botocore", "boto3", "s3transfer", "psycopg2", "pydantic",
+    "pydantic_core", "rich", "jinja2", "markupsafe", "fsspec", "anyio", "pygments", "bcrypt",
+    "requests", "urllib3", "certifi", "pyglet", "networkx", "shapely", "rtree", "psutil",
+    "pkg_resources", "setuptools",
+)
 
 
 def _dumpenv(out_path: str | None) -> int:

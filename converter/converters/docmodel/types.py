@@ -339,6 +339,12 @@ class Document:
     # nell'ordine di lettura), ma vanno conservati per i writer che li supportano.
     headers: list[Paragraph] = field(default_factory=list)
     footers: list[Paragraph] = field(default_factory=list)
+    # Pagine che il lettore non è riuscito a interpretare (PDF danneggiati): il
+    # resto del documento si legge, ma il verdetto deve dire cosa manca.
+    skipped_pages: int = 0
+    # Caratteri che il PDF non permette di decodificare (font senza mappa
+    # Unicode): resi con U+FFFD "�" e dichiarati nel verdetto.
+    undecoded_chars: int = 0
 
     def body_size(self) -> float:
         """Dimensione più diffusa, pesata sui caratteri: è il "testo normale"."""
