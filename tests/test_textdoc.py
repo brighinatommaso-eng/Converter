@@ -464,6 +464,20 @@ def _write_placed_text_pdf(path: Path, items: list[tuple[float, float, str]],
     _write_positioned_pdf(path, "".join(parts).encode("latin-1"))
 
 
+def test_pdf_single_line_is_not_guessed_as_right_aligned():
+    """Una pagina con una sola riga non è "right" solo perché la riga finisce
+    dove finisce il testo: il rilevatore deve vederla partire dal margine."""
+    from converter.converters.docmodel.pdfreader import _detect_align
+    from converter.converters.docmodel.types import Line, Paragraph, Run
+
+    line = Line(runs=[Run(text="Hello PDF")], x=72, y=700, width=120, height=10)
+    # text_right coincide con la fine dell'unica riga: è il caso che ingannava.
+    assert _detect_align(Paragraph(lines=[line]), 72.0, 192.0) == "left"
+
+    right = Line(runs=[Run(text="Hello PDF")], x=400, y=700, width=140, height=10)
+    assert _detect_align(Paragraph(lines=[right]), 72.0, 540.0) == "right"
+
+
 def test_pdf_aligned_numeric_table_is_detected(tmp_path):
     """Una tabella senza linee: le colonne sono solo parole allineate."""
     from converter.converters.docmodel import read_pdf
@@ -779,3 +793,303 @@ def test_docx_without_page_size_or_table_grid_does_not_crash(tmp_path):
     document = read_docx(src)
     assert document.blocks[0].text == "Text survives"
     assert document.blocks[1].rows[0][0].paragraphs[0].text == "A"
+
+
+# --- Fedeltà DOCX: link, immagini, testatine, merge -------------------------
+
+def _add_hyperlink(paragraph, url: str, text: str) -> None:
+    from docx.opc.constants import RELATIONSHIP_TYPE as RT
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
+
+    r_id = paragraph.part.relate_to(url, RT.HYPERLINK, is_external=True)
+    link = OxmlElement("w:hyperlink")
+    link.set(qn("r:id"), r_id)
+    run = OxmlElement("w:r")
+    node = OxmlElement("w:t")
+    node.text = text
+    run.append(node)
+    link.append(run)
+    paragraph._p.append(link)
+
+
+def test_docx_hyperlinks_survive_to_every_writer(tmp_path):
+    """`paragraph.runs` salta `w:hyperlink`: il testo del link spariva ovunque."""
+    from docx import Document as Docx
+
+    from converter.converters.docmodel import read_docx
+    from converter.converters.docmodel.writers import write_docx, write_html, write_markdown
+
+    src = tmp_path / "links.docx"
+    doc = Docx()
+    paragraph = doc.add_paragraph("Visit ")
+    _add_hyperlink(paragraph, "https://example.com/page", "Example")
+    paragraph.add_run(" today.")
+    doc.save(src)
+
+    document = read_docx(src)
+    body = next(block for block in document.blocks if isinstance(block, Paragraph))
+    assert body.text == "Visit Example today."
+    assert [(run.text, run.link) for line in body.lines for run in line.runs] == [
+        ("Visit ", ""), ("Example", "https://example.com/page"), (" today.", ""),
+    ]
+
+    md = tmp_path / "out.md"
+    write_markdown(document, md)
+    assert "[Example](<https://example.com/page>)" in md.read_text(encoding="utf-8")
+
+    page = tmp_path / "out.html"
+    write_html(document, page)
+    assert '<a href="https://example.com/page">Example</a>' in page.read_text(encoding="utf-8")
+
+    out = tmp_path / "out.docx"
+    write_docx(document, out)
+    again = next(block for block in read_docx(out).blocks if isinstance(block, Paragraph))
+    assert [(run.text, run.link) for line in again.lines for run in line.runs] == [
+        ("Visit ", ""), ("Example", "https://example.com/page"), (" today.", ""),
+    ]
+
+
+def test_docx_inline_images_become_image_blocks(tmp_path):
+    import io
+
+    from docx import Document as Docx
+    from PIL import Image
+
+    from converter.converters.docmodel import read_docx
+    from converter.converters.docmodel.types import ImageBlock
+
+    src = tmp_path / "image.docx"
+    doc = Docx()
+    doc.add_paragraph("Before")
+    buffer = io.BytesIO()
+    Image.new("RGB", (24, 16), (10, 120, 200)).save(buffer, format="PNG")
+    buffer.seek(0)
+    doc.add_picture(buffer)
+    doc.add_paragraph("After")
+    doc.save(src)
+
+    document = read_docx(src)
+    assert [type(block).__name__ for block in document.blocks] == [
+        "Paragraph", "ImageBlock", "Paragraph",
+    ]
+    image = document.blocks[1]
+    assert isinstance(image, ImageBlock)
+    assert image.ext == "png"
+    assert image.data.startswith(b"\x89PNG\r\n\x1a\n")
+    assert image.width_pt > 0 and image.height_pt > 0
+
+
+def test_docx_header_and_footer_reach_md_txt_html_and_docx(tmp_path):
+    from docx import Document as Docx
+
+    from converter.converters.docmodel import read_docx
+    from converter.converters.docmodel.writers import (
+        write_docx,
+        write_html,
+        write_markdown,
+        write_text,
+    )
+
+    src = tmp_path / "furniture.docx"
+    doc = Docx()
+    doc.add_paragraph("Body text")
+    section = doc.sections[0]
+    section.header.paragraphs[0].text = "Confidential header"
+    section.footer.paragraphs[0].text = "Page footer"
+    doc.save(src)
+
+    document = read_docx(src)
+    assert [paragraph.text for paragraph in document.headers] == ["Confidential header"]
+    assert [paragraph.text for paragraph in document.footers] == ["Page footer"]
+
+    md = tmp_path / "out.md"
+    write_markdown(document, md)
+    markdown = md.read_text(encoding="utf-8")
+    assert "Confidential header" in markdown and "Page footer" in markdown
+
+    txt = tmp_path / "out.txt"
+    write_text(document, txt)
+    text = txt.read_text(encoding="utf-8")
+    assert "Confidential header" in text and "Page footer" in text
+
+    page = tmp_path / "out.html"
+    write_html(document, page)
+    html = page.read_text(encoding="utf-8")
+    assert "<header>" in html and "<footer>" in html
+
+    out = tmp_path / "out.docx"
+    write_docx(document, out)
+    again = read_docx(out)
+    assert [paragraph.text for paragraph in again.headers] == ["Confidential header"]
+    assert [paragraph.text for paragraph in again.footers] == ["Page footer"]
+
+
+def test_docx_vertical_merge_is_one_cell_with_row_span(tmp_path):
+    """`w:vMerge` non è testo ripetuto: è una cella che copre più righe."""
+    from docx import Document as Docx
+
+    from converter.converters.docmodel import read_docx
+    from converter.converters.docmodel.types import Table
+    from converter.converters.docmodel.writers import write_docx, write_html
+
+    src = tmp_path / "vmerge.docx"
+    doc = Docx()
+    table = doc.add_table(rows=3, cols=2)
+    table.style = "Table Grid"
+    for row in range(3):
+        table.cell(row, 0).text = f"R{row}C0"
+        table.cell(row, 1).text = f"R{row}C1"
+    table.cell(0, 0).merge(table.cell(2, 0))
+    doc.save(src)
+
+    document = read_docx(src)
+    block = next(b for b in document.blocks if isinstance(b, Table))
+    assert [(cell.col, cell.col_span, cell.row_span) for cell in block.rows[0]] == [
+        (0, 1, 3), (1, 1, 1),
+    ]
+    assert [(cell.col, cell.row_span) for cell in block.rows[1]] == [(1, 1)]
+    assert [p.text for p in block.rows[0][0].paragraphs] == ["R0C0", "R1C0", "R2C0"]
+
+    page = tmp_path / "out.html"
+    write_html(document, page)
+    html = page.read_text(encoding="utf-8")
+    assert 'rowspan="3"' in html
+    assert html.count("R1C0") == 1       # la continuazione non duplica il testo
+
+    out = tmp_path / "out.docx"
+    write_docx(document, out)
+    again = next(b for b in read_docx(out).blocks if isinstance(b, Table))
+    assert again.rows[0][0].row_span == 3
+    assert [p.text for p in again.rows[0][0].paragraphs] == ["R0C0", "R1C0", "R2C0"]
+
+
+def test_docx_horizontal_merge_exposes_the_logical_column(tmp_path):
+    from docx import Document as Docx
+
+    from converter.converters.docmodel import read_docx
+    from converter.converters.docmodel.types import Table
+
+    src = tmp_path / "hmerge.docx"
+    doc = Docx()
+    table = doc.add_table(rows=1, cols=3)
+    table.cell(0, 0).merge(table.cell(0, 2)).text = "Merged header"
+    doc.save(src)
+
+    block = next(b for b in read_docx(src).blocks if isinstance(b, Table))
+    assert [(cell.col, cell.col_span) for cell in block.rows[0]] == [(0, 3)]
+
+
+def test_pdf_merge_fragments_reads_a_page_top_down():
+    """Le righe di una cella multilinea arrivano già top-down da pdfminer."""
+    from converter.converters.docmodel.pdfreader import _merge_fragments
+
+    lines = [
+        Line(runs=[Run(text="first")], x=72, y=688, width=40, height=10),
+        Line(runs=[Run(text="third")], x=72, y=664, width=40, height=10),
+        Line(runs=[Run(text="second")], x=72, y=676, width=40, height=10),
+    ]
+    assert [line.text for line in _merge_fragments(lines)] == ["first", "second", "third"]
+
+
+def test_html_font_name_cannot_break_out_of_the_style_attribute(tmp_path):
+    """Il nome font viene dal documento: non deve poter creare un attributo HTML."""
+    from converter.converters.docmodel.writers import write_html
+
+    page = tmp_path / "injected.html"
+    document = Document(blocks=[Paragraph(lines=[Line(runs=[
+        Run(text="hello", font='x" onmouseover="alert(1)'),
+    ])])])
+    write_html(document, page)
+    html = page.read_text(encoding="utf-8")
+    assert 'onmouseover="alert' not in html
+    assert "&quot;" in html
+
+
+def test_unsafe_link_schemes_are_dropped_from_md_and_html(tmp_path):
+    from converter.converters.docmodel.writers import write_html, write_markdown
+
+    document = Document(blocks=[Paragraph(lines=[Line(runs=[
+        Run(text="click", link="javascript:alert(1)"),
+    ])])])
+    md = tmp_path / "out.md"
+    write_markdown(document, md)
+    assert "javascript:" not in md.read_text(encoding="utf-8")
+    page = tmp_path / "out.html"
+    write_html(document, page)
+    assert "javascript:" not in page.read_text(encoding="utf-8")
+
+
+# --- Griglia logica compatta ------------------------------------------------
+
+def _cell(text: str, col: int, col_span: int = 1, row_span: int = 1):
+    from converter.converters.docmodel.types import TableCell
+
+    return TableCell(paragraphs=[Paragraph(lines=[Line(runs=[Run(text=text)])])],
+                     col=col, col_span=col_span, row_span=row_span)
+
+
+def test_text_grid_does_not_invent_columns_for_horizontal_merges():
+    """Una colonna coperta solo da un merge non diventa una colonna vuota."""
+    from converter.converters.docmodel.types import Table
+
+    only_merge = Table(rows=[
+        [_cell("Merged header", 0, col_span=3)],
+        [_cell("A", 0)],
+    ])
+    assert only_merge.text_grid() == [["Merged header"], ["A"]]
+
+    # Se un'altra riga inizia davvero in quelle colonne, restano (con celle vuote).
+    real_columns = Table(rows=[
+        [_cell("Merged header", 0, col_span=3)],
+        [_cell("A", 0), _cell("B", 1), _cell("C", 2)],
+    ])
+    assert real_columns.text_grid() == [["Merged header", "", ""], ["A", "B", "C"]]
+
+
+def test_text_grid_repeats_a_vertical_merge_down_its_rows():
+    from converter.converters.docmodel.types import Table
+
+    table = Table(rows=[
+        [_cell("Span", 0, row_span=3), _cell("one", 1)],
+        [_cell("two", 1)],
+        [_cell("three", 1)],
+    ])
+    assert table.text_grid() == [["Span", "one"], ["Span", "two"], ["Span", "three"]]
+
+
+def test_text_grid_keeps_rows_that_have_no_cells():
+    """Bug54771b: le celle stanno dentro w:sdt, la tabella ha 3 righe vuote."""
+    from converter.converters.docmodel.types import Table
+
+    table = Table(rows=[[], [], []])
+    assert table.text_grid() == [[], [], []]
+
+
+def test_empty_table_is_not_written_as_broken_markdown(tmp_path):
+    from converter.converters.docmodel.types import Table
+    from converter.converters.docmodel.writers import (
+        write_docx,
+        write_html,
+        write_markdown,
+        write_text,
+    )
+
+    document = Document(blocks=[Table(rows=[[], [], []])])
+    md = tmp_path / "out.md"
+    write_markdown(document, md)
+    markdown = md.read_text(encoding="utf-8")
+    assert "|" not in markdown          # nessuna tabella GFM con zero colonne
+
+    txt = tmp_path / "out.txt"
+    write_text(document, txt)
+    assert txt.read_text(encoding="utf-8").strip() == ""
+
+    page = tmp_path / "out.html"
+    write_html(document, page)
+    assert "<table" not in page.read_text(encoding="utf-8")
+
+    out = tmp_path / "out.docx"
+    write_docx(document, out)
+    assert out.exists()
+

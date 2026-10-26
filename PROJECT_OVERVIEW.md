@@ -4,9 +4,9 @@ A complete picture of the app: what it is, how it's built, the principles and co
 the work done so far, the bugs solved, and my (the owner's) working preferences. Written so a
 future session can pick up with full context without re-deriving everything.
 
-- **App:** Converter `0.1.1` — *"Convert files locally — honest about quality."*
+- **App:** Converter `0.1.2` — *"Convert files locally — honest about quality."*
 - **Stack:** Python 3.13 + PySide6 (Qt6), offline desktop app, Windows-first.
-- **Last updated:** 2026-07-04.
+- **Last updated:** 2026-10-26.
 - **Note on authorship:** §§1–13 document how the application is built (reference, derived
   from the codebase). §14 onward is the work done in recent sessions (GUI redesign
   integration + bug fixes, the docx/odt→html routing change, the PDF import converter with
@@ -152,11 +152,11 @@ Theme preference is stored via `QSettings("Converter","Converter")`.
 ## 9. Testing
 
 - Run: `python -m pytest -q` (config in `pyproject.toml`, `testpaths=["tests"]`).
-- **Current status in this workspace: 448 collected — 428 passing, 20 xfailed** (measured
-  2026-10-25 with ffmpeg, LibreOffice, pandoc, python-docx and trimesh present). The 20
+- **Current status in this workspace: 168 collected — 148 passing, 20 xfailed** (measured
+  2026-10-26 with ffmpeg, LibreOffice, pandoc, python-docx and trimesh present). The 20
   xfails are corrupt/encrypted files in the local real-document corpus (see
   `tests/corpus/README.md`); the 147 readable corpus documents are regression-locked.
-  Without `tests/corpus/local/`, the corpus test skips and the suite is 280 passed.
+  Without `tests/corpus/local/`, the corpus test skips and the suite is 288 passed.
 - GUI tests set `QT_QPA_PLATFORM=offscreen` (keep that for new GUI tests, or they need a
   display). GUI tests are behavioral (`test_gui_engine_toggle`, `test_gui_history`,
   `test_gui_options`, `test_gui_batch`) — they don't assert theme/layout, so visual
@@ -492,20 +492,24 @@ flag. `--selftest` now covers `portable pdf->txt/md/docx/html` and
 `THIRD_PARTY_NOTICES.md` lists python-docx + lxml and states no AGPL PDF engine
 is used.
 
-**Tests:** `tests/test_textdoc.py` (34 collected) — routing/availability in both
+**Tests:** `tests/test_textdoc.py` (47 collected) — routing/availability in both
 modes, the OCR validate gate (mocked chain), a broken PDF, pure-IR unit tests,
 reader robustness (positioned words, `w:numPr` lists, comments in the body,
 missing page size/table grid, merged cells), aligned-table detection (numeric
 2-column, caption-gated 3-column, two-column prose rejection, fragment merge),
 xy-cut column order, and end-to-end assertions on a LibreOffice-built rich PDF
-for md/txt/docx structure/visual/html/odt plus docx→md GFM tables.
+for md/txt/docx structure/visual/html/odt plus docx→md GFM tables. DOCX fidelity
+is covered separately: hyperlinks reach every writer, inline images become
+`ImageBlock`s, header/footer survive md/txt/html/docx, `vMerge` becomes one cell
+with `row_span` (and `hMerge` one cell with `col_span`), a rotated font name
+cannot escape the HTML `style` attribute, and unsafe link schemes are dropped.
 `tests/test_corpus.py` is the real-document harness (structure digest vs JSON
 baselines — see `tests/corpus/README.md`): 147 readable documents pass, 20
 corrupt/encrypted files xfail; in `CORPUS_UPDATE=1` mode unreadable files
 without a baseline skip instead of failing. Stale `pdf_import` tests were
 deleted/updated (matrix, document converter, risk 9/17).
-Full suite: **428 passed, 20 xfailed** with the local corpus (280 passed without
-it), 2026-10-25.
+Full suite: **148 passed, 20 xfailed** with the local corpus (288 passed without
+it), 2026-10-26.
 
 **Corpus pass (2026-10-24).** 167 real PDF/DOCX files (Unstructured
 `example-docs`, Apache POI `test-data/document`) through the harness. Fixes driven
@@ -524,8 +528,7 @@ Known gaps, in priority order: borderless tables with only two rows, or with no
 numbers/caption/bold header, are still missed (e.g. the Korean 2-row table);
 multi-line table cells (wrapped continuation lines) still split a table into
 fragments, because the continuation line lands outside the row's vertical span;
-image-only PDFs need the OCR chain; DOCX headers/footers and vertical merges are
-not represented in the IR.
+image-only PDFs need the OCR chain.
 
 **Aligned tables beside a text column (2026-10-25).** A table in the right column
 of a two-column page shares its row bands with the prose of the left column. Three
@@ -570,6 +573,27 @@ an unreadable stream falls back to the original bytes. Same document: 40 MB →
 4.05 MB of image data, 53 MB → 5.4 MB of Markdown. The corpus baselines only
 record image sizes, so they are unchanged; one regression test covers the
 conversion and the two fallbacks.
+
+**DOCX fidelity: links, images, header/footer, merges (2026-10-26).** The DOCX
+reader used `paragraph.runs`, which **skips `w:hyperlink` children**: every link
+display text silently disappeared from md/txt/html/docx. It now walks the
+paragraph in document order (`_iter_runs`) and carries `Run.link` through every
+writer: Markdown emits `[text](<url>)`, HTML an `<a>` (scheme-checked:
+`http`/`https`/`mailto`/`tel`/relative/anchor only, so `javascript:` is dropped),
+DOCX a real `w:hyperlink` with an external relationship. Inline `w:drawing`
+images become `ImageBlock`s with their display size in points; `w:headerReference`
+/ `w:footerReference` paragraphs land in `Document.headers`/`footers` and are
+written back to the first section. Table merges are now structural: `w:gridSpan`
+becomes `col_span`, `w:vMerge` restart/continue becomes `row_span` on the origin
+cell (continuations no longer duplicate text), and `Table.text_grid()` produces
+the compact logical grid used by md/txt and the corpus digest — one column per
+cell that actually starts there, with merged text repeated down the covered rows.
+`writers.py` sanitises CSS values and HTML attributes (`html.escape`), because a
+font name comes from the source document. Fixed a reader bug where
+`_paragraph_parts.flush()` cleared the shared run list before building the
+paragraph. Corpus effect: 24 baselines changed, all improvements (recovered link
+text, DOCX images that were absent, PDF cells in top-down order) and zero text
+loss; `Bug54771b.docx` keeps its three empty rows (cells inside `w:sdt`).
 
 ---
 

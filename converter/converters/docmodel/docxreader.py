@@ -3,13 +3,27 @@
 Serve alle coppie docx→md/txt: pandoc le copre già, ma produce "grid table" e
 appiattisce i titoli nel front-matter. Qui la struttura Word (Heading N, liste,
 tabelle con header) arriva all'IR e quindi a un Markdown GFM pulito.
+
+Il lettore conserva anche ciò che Word mette fuori dai semplici `paragraph.runs`:
+hyperlink, immagini inline, testatine/piè di pagina e merge verticali/orizzontali
+delle celle. Sono tutti dati dell'IR, non scorciatoie del singolo writer.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 
-from .types import Document, Line, ListBlock, ListItem, Paragraph, Run, Table, TableCell
+from .types import Document, ImageBlock, Line, ListBlock, ListItem, Paragraph, Run, Table, TableCell
+
+_IMAGE_EXT = {
+    "image/png": "png",
+    "image/jpeg": "jpg",
+    "image/gif": "gif",
+    "image/bmp": "bmp",
+    "image/tiff": "tif",
+    "image/webp": "webp",
+    "image/svg+xml": "svg",
+}
 
 
 def _run_style(run, style) -> tuple[bool, bool, str, float, str]:
@@ -32,56 +46,221 @@ def _run_style(run, style) -> tuple[bool, bool, str, float, str]:
     return bold, italic, family, size, color
 
 
-def _paragraph(docx_paragraph) -> tuple[Paragraph, str, int]:
-    """(paragrafo IR, nome stile, livello) da un paragrafo Word."""
-    style = docx_paragraph.style
-    style_name = style.name if style is not None else ""
-    runs: list[Run] = []
-    for run in docx_paragraph.runs:
-        text = run.text
-        if not text:
-            continue
-        bold, italic, family, size, color = _run_style(run, style)
-        runs.append(Run(text=text, bold=bold, italic=italic, font=family, size=size, color=color))
+def _iter_runs(docx_paragraph):
+    """(run, URL) nell'ordine del documento, hyperlink compresi.
 
-    level = 0
+    `paragraph.runs` salta completamente il testo dentro `w:hyperlink`: un
+    documento con un link perdeva quelle parole in Markdown e in TXT.
+    """
+    from docx.text.hyperlink import Hyperlink
+
+    for item in docx_paragraph.iter_inner_content():
+        if isinstance(item, Hyperlink):
+            try:
+                link = item.url or ""
+            except Exception:
+                link = ""       # relazione rotta: il testo resta, il link no
+            for run in item.runs:
+                yield run, link
+        else:
+            yield item, ""
+
+
+def _run_ir(run, style, link: str = "") -> Run | None:
+    text = run.text
+    if not text:
+        return None
+    bold, italic, family, size, color = _run_style(run, style)
+    return Run(text=text, bold=bold, italic=italic, font=family, size=size,
+               color=color, link=link)
+
+
+def _paragraph_from_runs(runs: list[Run], style_name: str) -> Paragraph:
     low = style_name.lower()
     if low == "title":
-        paragraph = Paragraph(lines=[Line(runs=runs)], style="title", level=1)
-    elif low.startswith("heading "):
+        return Paragraph(lines=[Line(runs=runs)], style="title", level=1)
+    if low.startswith("heading "):
         try:
             level = int(low.split()[-1])
         except ValueError:
             level = 1
-        paragraph = Paragraph(lines=[Line(runs=runs)], style="heading", level=level)
-    else:
-        paragraph = Paragraph(lines=[Line(runs=runs)])
-    return paragraph, style_name, level
+        return Paragraph(lines=[Line(runs=runs)], style="heading", level=level)
+    return Paragraph(lines=[Line(runs=runs)])
 
 
-def _cell_paragraphs(docx_cell) -> list[Paragraph]:
+def _paragraph(docx_paragraph) -> tuple[Paragraph, str, int]:
+    """(paragrafo IR, nome stile, livello) da un paragrafo Word."""
+    style = docx_paragraph.style
+    style_name = style.name if style is not None else ""
+    runs = [run for item, link in _iter_runs(docx_paragraph)
+            if (run := _run_ir(item, style, link)) is not None]
+    paragraph = _paragraph_from_runs(runs, style_name)
+    return paragraph, style_name, paragraph.level
+
+
+def _image_extension(part) -> str:
+    content_type = str(getattr(part, "content_type", "") or "").lower()
+    if content_type in _IMAGE_EXT:
+        return _IMAGE_EXT[content_type]
+    suffix = str(getattr(getattr(part, "partname", None), "ext", "") or "").lower()
+    if suffix:
+        return "jpg" if suffix == "jpeg" else suffix
+    return "png"
+
+
+def _drawing_size(drawing) -> tuple[float, float]:
+    from docx.oxml.ns import qn
+
+    for extent in drawing.iter(qn("wp:extent")):
+        try:
+            return float(int(extent.get("cx"))) / 12700.0, float(int(extent.get("cy"))) / 12700.0
+        except (TypeError, ValueError):
+            break
+    return 0.0, 0.0
+
+
+def _images_from_run(run) -> list[ImageBlock]:
+    """Immagini inline/ancorate contenute in un run Word."""
+    from docx.oxml.ns import qn
+
+    images: list[ImageBlock] = []
+    for drawing in run._r.iter(qn("w:drawing")):
+        for blip in drawing.iter(qn("a:blip")):
+            rid = blip.get(qn("r:embed")) or blip.get(qn("r:link"))
+            if not rid:
+                continue
+            try:
+                part = run.part.related_parts[rid]
+                data = part.blob
+            except (KeyError, AttributeError):
+                continue
+            width, height = _drawing_size(drawing)
+            images.append(ImageBlock(data=data, ext=_image_extension(part),
+                                     width_pt=width, height_pt=height))
+    return images
+
+
+def _paragraph_parts(docx_paragraph) -> tuple[list[Paragraph | ImageBlock], str]:
+    """Blocchi di un paragrafo, spezzati attorno alle immagini.
+
+    Un'immagine inline non è testo: diventa un `ImageBlock` nello stesso punto
+    dell'ordine di lettura. Se il paragrafo ha solo l'immagine non viene creato
+    un paragrafo vuoto.
+    """
+    style = docx_paragraph.style
+    style_name = style.name if style is not None else ""
+    runs: list[Run] = []
+    blocks: list[Paragraph | ImageBlock] = []
+
+    def flush() -> None:
+        if any(run.text.strip() for run in runs):
+            blocks.append(_paragraph_from_runs(list(runs), style_name))
+        runs.clear()
+
+    for item, link in _iter_runs(docx_paragraph):
+        run = _run_ir(item, style, link)
+        if run is not None:
+            runs.append(run)
+        for image in _images_from_run(item):
+            flush()
+            blocks.append(image)
+    flush()
+    return blocks, style_name
+
+
+def _cell_paragraphs(tc, docx) -> list[Paragraph]:
+    """Paragrafi di una cella, leggendo il `w:tc` grezzo (merge inclusi)."""
+    from docx.oxml.ns import qn
+    from docx.text.paragraph import Paragraph as DocxParagraph
+
     paragraphs = []
-    for docx_paragraph in docx_cell.paragraphs:
-        paragraph, _, _ = _paragraph(docx_paragraph)
+    for child in tc.findall(qn("w:p")):
+        paragraph, _, _ = _paragraph(DocxParagraph(child, docx))
         if paragraph.text.strip():
             paragraphs.append(paragraph)
     return paragraphs
 
 
-def _row_cells(docx_row) -> list[TableCell]:
-    """Celle della riga, senza le copie delle celle unite orizzontalmente.
+def _grid_span(tc) -> int:
+    from docx.oxml.ns import qn
 
-    python-docx restituisce lo stesso `w:tc` una volta per colonna coperta: una
-    intestazione unita su 63 colonne diventerebbe 63 celle con lo stesso testo.
+    tc_pr = tc.tcPr
+    span = tc_pr.find(qn("w:gridSpan")) if tc_pr is not None else None
+    try:
+        return max(1, int(span.get(qn("w:val")))) if span is not None else 1
+    except (TypeError, ValueError):
+        return 1
+
+
+def _vertical_merge(tc) -> str:
+    """`restart`, `continue` o "" per una cella Word."""
+    from docx.oxml.ns import qn
+
+    tc_pr = tc.tcPr
+    merge = tc_pr.find(qn("w:vMerge")) if tc_pr is not None else None
+    if merge is None:
+        return ""
+    return merge.get(qn("w:val")) or "continue"
+
+
+def _table_rows(table, docx) -> list[list[TableCell]]:
+    """Righe con merge orizzontali e verticali rappresentati nell'IR.
+
+    Una continuazione verticale non crea una cella nuova: incrementa `row_span`
+    della cella di partenza. `col` tiene la posizione logica anche quando la
+    cella coperta è stata omessa, così i writer possono ricostruire la griglia.
     """
-    cells: list[TableCell] = []
-    previous_tc = None
-    for docx_cell in docx_row.cells:
-        if docx_cell._tc is previous_tc:
-            continue
-        cells.append(TableCell(paragraphs=_cell_paragraphs(docx_cell)))
-        previous_tc = docx_cell._tc
-    return cells
+    rows: list[list[TableCell]] = []
+    active: dict[int, TableCell] = {}
+
+    for tr in table._tbl.tr_lst:
+        row: list[TableCell] = []
+        continued: set[int] = set()
+        started: set[int] = set()
+        col = 0
+        for tc in tr.tc_lst:
+            span = _grid_span(tc)
+            merge = _vertical_merge(tc)
+            if merge == "continue":
+                origin = active.get(col)
+                if origin is not None:
+                    origin.row_span += 1
+                    continued.add(col)
+                col += span
+                continue
+
+            for covered in range(col, col + span):
+                active.pop(covered, None)
+            cell = TableCell(paragraphs=_cell_paragraphs(tc, docx),
+                             col=col, col_span=span)
+            if merge == "restart":
+                active[col] = cell
+                started.add(col)
+            row.append(cell)
+            col += span
+
+        # Un merge che non è continuato nella riga successiva è finito: non deve
+        # restare appeso se il documento è malformato e salta una cella.
+        for key in list(active):
+            if key not in continued and key not in started:
+                active.pop(key, None)
+        rows.append(row)
+    return rows
+
+
+def _table_widths(table) -> list[float]:
+    widths: list[float] = []
+    try:
+        for column in table.columns:
+            try:
+                widths.append(float(column.width.pt) if column.width else 0.0)
+            except (AttributeError, ValueError):
+                widths.append(0.0)
+    except Exception:
+        # Tabelle malformate senza w:tblGrid (Bug66263): la griglia testuale
+        # resta valida, si perdono solo le larghezze.
+        return []
+    return [width for width in widths if width]
 
 
 def _numbering_info(docx_paragraph) -> tuple[bool, int] | None:
@@ -133,6 +312,32 @@ def _numbering_info(docx_paragraph) -> tuple[bool, int] | None:
     return ordered, level
 
 
+def _section_furniture(docx) -> tuple[list[Paragraph], list[Paragraph]]:
+    """Testatine/piè di pagina delle sezioni, senza duplicare quelle collegate."""
+    headers: list[Paragraph] = []
+    footers: list[Paragraph] = []
+    seen_headers: set[str] = set()
+    seen_footers: set[str] = set()
+
+    for section in docx.sections:
+        for attr, target, seen in (("header", headers, seen_headers),
+                                   ("footer", footers, seen_footers)):
+            try:
+                container = getattr(section, attr)
+                if container.is_linked_to_previous:
+                    continue
+                paragraphs = container.paragraphs
+            except Exception:
+                continue
+            for docx_paragraph in paragraphs:
+                paragraph, _, _ = _paragraph(docx_paragraph)
+                text = paragraph.text.strip()
+                if text and text not in seen:
+                    target.append(paragraph)
+                    seen.add(text)
+    return headers, footers
+
+
 def read_docx(path: Path) -> Document:
     """DOCX → Document. Solleva ValueError con messaggio pulito se illeggibile."""
     from docx import Document as DocxDocument
@@ -157,6 +362,8 @@ def read_docx(path: Path) -> Document:
         if section.right_margin is not None:
             document.margin_right_pt = float(section.right_margin.pt)
 
+    document.headers, document.footers = _section_furniture(docx)
+
     pending_list: ListBlock | None = None
 
     def flush_list() -> None:
@@ -170,35 +377,20 @@ def read_docx(path: Path) -> Document:
         if tag == "tbl":
             flush_list()
             table = DocxTable(child, docx)
-            rows = [_row_cells(row) for row in table.rows]
-            widths: list[float] = []
-            try:
-                for column in table.columns:
-                    try:
-                        widths.append(float(column.width.pt) if column.width else 0.0)
-                    except (AttributeError, ValueError):
-                        widths.append(0.0)
-            except Exception:
-                # Tabelle malformate senza w:tblGrid (Bug66263): la griglia
-                # testuale resta valida, si perdono solo le larghezze.
-                widths = []
-            document.blocks.append(Table(rows=rows, borders=True, header_rows=1,
-                                         widths_pt=[w for w in widths if w] or []))
+            document.blocks.append(Table(rows=_table_rows(table, docx), borders=True,
+                                         header_rows=1, widths_pt=_table_widths(table)))
             continue
         if tag != "p":
             continue
 
-        paragraph, style_name, _ = _paragraph(DocxParagraph(child, docx))
-        if not paragraph.text.strip():
+        parts, style_name = _paragraph_parts(DocxParagraph(child, docx))
+        if not parts:
             continue
         low = style_name.lower()
-        if low == "title" or low.startswith("heading "):
-            flush_list()
-            document.blocks.append(paragraph)
-            continue
+        is_heading = low == "title" or low.startswith("heading ")
 
-        info = _numbering_info(DocxParagraph(child, docx))
-        if info is None:
+        info = None if is_heading else _numbering_info(DocxParagraph(child, docx))
+        if info is None and not is_heading:
             is_bullet_style = low.startswith("list bullet")
             is_number_style = low.startswith("list number")
             if is_bullet_style or is_number_style:
@@ -206,17 +398,25 @@ def read_docx(path: Path) -> Document:
                 level = int(suffix) if suffix.isdigit() else 1
                 info = (is_number_style, level)
 
-        if info is not None:
-            ordered, level = info
-            if pending_list is None or pending_list.ordered != ordered:
-                pending_list = ListBlock(ordered=ordered)
-                document.blocks.append(pending_list)
-            marker = "•" if not ordered else "1"
-            pending_list.items.append(ListItem(marker=marker, level=level, paragraph=paragraph))
-            continue
-
-        flush_list()
-        document.blocks.append(paragraph)
+        for part in parts:
+            if isinstance(part, ImageBlock):
+                flush_list()
+                document.blocks.append(part)
+                continue
+            if is_heading:
+                flush_list()
+                document.blocks.append(part)
+                continue
+            if info is not None:
+                ordered, level = info
+                if pending_list is None or pending_list.ordered != ordered:
+                    pending_list = ListBlock(ordered=ordered)
+                    document.blocks.append(pending_list)
+                marker = "•" if not ordered else "1"
+                pending_list.items.append(ListItem(marker=marker, level=level, paragraph=part))
+                continue
+            flush_list()
+            document.blocks.append(part)
 
     if document.title == "":
         for block in document.blocks:

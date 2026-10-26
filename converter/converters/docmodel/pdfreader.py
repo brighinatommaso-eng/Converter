@@ -277,6 +277,11 @@ def _merge_fragments(fragments: list[Line]) -> list[Line]:
                 continue
         merged.append(Line(runs=list(line.runs), words=list(line.words), x=line.x,
                            y=line.y, width=line.width, height=line.height))
+    # L'ordinamento iniziale serve solo a unire i frammenti sulla stessa base:
+    # per la lettura, però, una pagina (e soprattutto una cella multilinea) va
+    # dall'alto verso il basso. Senza questo sort le righe di una cella lunga
+    # arrivavano invertite, con le parole di ogni riga mescolate alle altre.
+    merged.sort(key=lambda ln: (-round(ln.y, 1), ln.x))
     return merged
 
 
@@ -891,7 +896,11 @@ def _detect_align(paragraph: Paragraph, text_left: float, text_right: float) -> 
         body = lines[:-1]
         if all(abs(ln.right - text_right) <= 3.0 for ln in body) and lines[-1].right < text_right - 2:
             return "justify"
-    if all(abs(ln.right - text_right) <= 4.0 for ln in lines) and abs(lines[0].x - text_right) > 20:
+    if (all(abs(ln.right - text_right) <= 4.0 for ln in lines)
+            and all(ln.x > text_left + 12 for ln in lines)):
+        # Deve iniziare lontano dal margine sinistro: su una pagina con una
+        # sola riga `text_right` coincide con la riga, e il vecchio test
+        # (`abs(x - text_right) > 20`) la classificava "right" per finta.
         return "right"
     return "left"
 

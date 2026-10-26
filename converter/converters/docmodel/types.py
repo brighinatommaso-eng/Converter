@@ -45,6 +45,7 @@ class Run:
     font: str = ""      # famiglia leggibile ("Calibri"), "" = quella del formato
     size: float = 0.0   # punti tipografici, 0 = sconosciuta
     color: str = ""     # "#RRGGBB", "" = nero/default
+    link: str = ""      # URL di un hyperlink Word, "" = testo normale
 
 
 @dataclass(slots=True)
@@ -195,6 +196,9 @@ class ListBlock:
 @dataclass(slots=True)
 class TableCell:
     paragraphs: list[Paragraph] = field(default_factory=list)
+    col: int = -1                # colonna logica (0-based), -1 = posizione sequenziale
+    col_span: int = 1            # merge orizzontale Word (w:gridSpan)
+    row_span: int = 1            # merge verticale Word (w:vMerge restart/continue)
 
 
 @dataclass(slots=True)
@@ -207,6 +211,55 @@ class Table:
     y: float = 0.0
     width: float = 0.0
     height: float = 0.0
+
+    @property
+    def col_count(self) -> int:
+        """Numero di colonne della griglia, contando anche le celle unite."""
+        count = len(self.widths_pt)
+        for row in self.rows:
+            fallback = 0
+            for cell in row:
+                col = cell.col if cell.col >= 0 else fallback
+                count = max(count, col + max(1, cell.col_span))
+                fallback = col + max(1, cell.col_span)
+        return count
+
+    def text_grid(self) -> list[list[str]]:
+        """Griglia logica compatta: i merge ripetono il testo nelle righe coperte.
+
+        Le colonne sono quelle in cui una cella *inizia* davvero: una colonna
+        coperta solo da un merge orizzontale non diventa una colonna vuota in
+        Markdown/TXT. Markdown e TXT non hanno rowspan/colspan, quindi questa è
+        la vista tabellare comune ai writer e allo snapshot dei test.
+        """
+        entries: list[list[tuple[int, int, str]]] = []
+        origins: set[int] = set()
+        for row in self.rows:
+            fallback = 0
+            row_entries: list[tuple[int, int, str]] = []
+            for cell in row:
+                col = cell.col if cell.col >= 0 else fallback
+                span = max(1, cell.col_span)
+                text = " ".join(p.text for p in cell.paragraphs if p.text.strip()).strip()
+                row_entries.append((col, max(1, cell.row_span), text))
+                origins.add(col)
+                fallback = col + span
+            entries.append(row_entries)
+
+        columns = sorted(origins)
+        if not columns:
+            # Righe presenti ma senza celle (es. celle dentro w:sdt): la struttura
+            # delle righe va conservata, non azzerata.
+            return [[] for _ in self.rows]
+        index = {col: position for position, col in enumerate(columns)}
+        grid = [["" for _ in columns] for _ in self.rows]
+        for row_index, row_entries in enumerate(entries):
+            for col, row_span, text in row_entries:
+                target = index[col]
+                for covered in range(row_index, min(len(grid), row_index + row_span)):
+                    if not grid[covered][target]:
+                        grid[covered][target] = text
+        return grid
 
     @property
     def right(self) -> float:
@@ -260,6 +313,10 @@ class Document:
     margin_right_pt: float = 0.0
     title: str = ""
     source_format: str = ""
+    # Testatina/piè di pagina Word: non sono blocchi del corpo (non si ripetono
+    # nell'ordine di lettura), ma vanno conservati per i writer che li supportano.
+    headers: list[Paragraph] = field(default_factory=list)
+    footers: list[Paragraph] = field(default_factory=list)
 
     def body_size(self) -> float:
         """Dimensione più diffusa, pesata sui caratteri: è il "testo normale"."""

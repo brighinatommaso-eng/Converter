@@ -70,9 +70,7 @@ def _digest(document: Document) -> dict:
         elif isinstance(block, Table):
             blocks.append({
                 "type": "table",
-                "rows": [[_normalise(" ".join(p.text for p in cell.paragraphs if p.text.strip()))
-                          for cell in row]
-                         for row in block.rows],
+                "rows": [[_normalise(text) for text in row] for row in block.text_grid()],
             })
         elif isinstance(block, ImageBlock):
             blocks.append({"type": "image", "width_pt": round(block.width_pt, 1),

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import base64
 import html as html_lib
+import re
 from io import BytesIO
 from pathlib import Path
 
@@ -20,17 +21,60 @@ from .types import Document, ImageBlock, ListBlock, PageBreak, Paragraph, Run, T
 
 # --- html / md comuni -------------------------------------------------------
 
+_SAFE_ALIGN = {"left", "center", "right", "justify"}
+_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
+_SAFE_SCHEMES = {"http", "https", "mailto", "tel"}
+
+
 def _escape(text: str) -> str:
     return html_lib.escape(text, quote=False)
+
+
+def _css_string(value: str) -> str:
+    """Stringa CSS fra doppi apici, con escape anche di apici e control char.
+
+    Il nome di un font viene dal documento, quindi è input non fidato: senza
+    questo escape un font chiamato `x" onmouseover="...` chiudeva l'attributo
+    `style` e aggiungeva un evento JavaScript all'HTML generato.
+    """
+    out = []
+    for char in value:
+        if char in ('\\', '"'):
+            out.append("\\" + char)
+        elif char == "\r":
+            out.append("\\d ")
+        elif char == "\n":
+            out.append("\\a ")
+        elif ord(char) < 32 or ord(char) == 127:
+            out.append(f"\\{ord(char):x} ")
+        else:
+            out.append(char)
+    return '"' + "".join(out) + '"'
+
+
+def _safe_href(url: str) -> str:
+    """Solo link apribili senza eseguire codice nel browser."""
+    url = (url or "").strip()
+    if not url:
+        return ""
+    if url.startswith(("#", "/", "./", "../")):
+        return url
+    from urllib.parse import urlsplit
+
+    try:
+        scheme = urlsplit(url).scheme.lower()
+    except ValueError:
+        return ""
+    return url if scheme in _SAFE_SCHEMES else ""
 
 
 def _run_style(run: Run) -> str:
     parts = []
     if run.font:
-        parts.append(f"font-family:'{run.font}'")
+        parts.append(f"font-family:{_css_string(run.font)}")
     if run.size:
         parts.append(f"font-size:{run.size:g}pt")
-    if run.color:
+    if run.color and _COLOR_RE.match(run.color):
         parts.append(f"color:{run.color}")
     return ";".join(parts)
 
@@ -43,11 +87,16 @@ def _html_runs(runs: list[Run]) -> str:
             continue
         style = _run_style(run)
         if style:
-            text = f'<span style="{style}">{text}</span>'
+            # Anche il valore CSS va escapato come attributo: `_css_string`
+            # impedisce di uscire dalla stringa CSS, questo dalla stringa HTML.
+            text = f'<span style="{html_lib.escape(style, quote=True)}">{text}</span>'
         if run.italic:
             text = f"<em>{text}</em>"
         if run.bold:
             text = f"<strong>{text}</strong>"
+        href = _safe_href(run.link)
+        if href:
+            text = f'<a href="{html_lib.escape(href, quote=True)}">{text}</a>'
         out.append(text)
     return "".join(out)
 
@@ -62,7 +111,13 @@ def _para_align_style(paragraph: Paragraph) -> str:
 
 
 def _md_escape(text: str) -> str:
-    return text.replace("\\", "\\\\").replace("|", "\\|").replace("\n", " ")
+    return (text.replace("\\", "\\\\").replace("|", "\\|")
+            .replace("[", "\\[").replace("]", "\\]").replace("\n", " "))
+
+
+def _md_url(url: str) -> str:
+    return (url.replace("<", "%3C").replace(">", "%3E")
+            .replace(" ", "%20").replace("\n", "%0A"))
 
 
 def _md_runs(runs: list[Run], *, heading: bool = False) -> str:
@@ -76,6 +131,9 @@ def _md_runs(runs: list[Run], *, heading: bool = False) -> str:
             text = f"*{text}*"
         if run.bold and not heading:   # un heading è già enfatizzato: ** è rumore
             text = f"**{text}**"
+        href = _safe_href(run.link)
+        if href:
+            text = f"[{text}](<{_md_url(href)}>)"
         out.append(text)
     return "".join(out)
 
@@ -90,7 +148,7 @@ def _paragraph_runs(paragraph: Paragraph) -> list[Run]:
         elif index > 0 and runs and chunk:
             runs[-1].text = runs[-1].text.rstrip() + " "
         runs.extend(Run(text=r.text, bold=r.bold, italic=r.italic, underline=r.underline,
-                        font=r.font, size=r.size, color=r.color) for r in chunk)
+                        font=r.font, size=r.size, color=r.color, link=r.link) for r in chunk)
     if runs:
         runs[0].text = runs[0].text.lstrip()
         runs[-1].text = runs[-1].text.rstrip()
@@ -102,8 +160,9 @@ def _paragraph_runs(paragraph: Paragraph) -> list[Run]:
             continue
         if merged:
             last = merged[-1]
-            if (last.bold, last.italic, last.underline, last.font, last.size, last.color) == \
-                    (run.bold, run.italic, run.underline, run.font, run.size, run.color):
+            if (last.bold, last.italic, last.underline, last.font, last.size, last.color,
+                    last.link) == (run.bold, run.italic, run.underline, run.font, run.size,
+                                   run.color, run.link):
                 last.text += run.text
                 continue
         merged.append(run)
@@ -111,17 +170,28 @@ def _paragraph_runs(paragraph: Paragraph) -> list[Run]:
 
 
 def _table_text(table: Table) -> list[list[str]]:
-    rows = []
-    for row in table.rows:
-        rows.append([" ".join(p.text for p in cell.paragraphs if p.text.strip()).strip()
-                     for cell in row])
-    return rows
+    return table.text_grid()
+
+
+def _table_has_text(table: Table) -> bool:
+    """Una tabella senza testo (es. righe con celle dentro w:sdt) non va scritta.
+
+    Markdown non può rappresentare zero colonne: emetterebbe un separatore
+    senza `---`, cioè una tabella invalida. Lo snapshot del corpus la conserva
+    comunque, perché la struttura delle righe è un dato.
+    """
+    return any(paragraph.text.strip()
+               for row in table.rows for cell in row for paragraph in cell.paragraphs)
 
 
 # --- Markdown ---------------------------------------------------------------
 
 def _md_blocks(document: Document) -> list[str]:
     blocks: list[str] = []
+    for paragraph in document.headers:
+        text = _md_runs(_paragraph_runs(paragraph)).strip()
+        if text:
+            blocks.append(text)
     for block in document.blocks:
         if isinstance(block, Paragraph):
             runs = _paragraph_runs(block)
@@ -148,7 +218,7 @@ def _md_blocks(document: Document) -> list[str]:
                 blocks.append("\n".join(lines))
         elif isinstance(block, Table):
             rows = _table_text(block)
-            if not rows:
+            if not rows or not _table_has_text(block):
                 continue
             width = max(len(row) for row in rows)
             rows = [row + [""] * (width - len(row)) for row in rows]
@@ -168,6 +238,10 @@ def _md_blocks(document: Document) -> list[str]:
             blocks.append(f'<img alt="image" src="data:image/{block.ext};base64,{payload}">')
         elif isinstance(block, PageBreak):
             continue
+    for paragraph in document.footers:
+        text = _md_runs(_paragraph_runs(paragraph)).strip()
+        if text:
+            blocks.append(text)
     return blocks
 
 
@@ -179,6 +253,10 @@ def write_markdown(document: Document, path: Path) -> None:
 
 def write_text(document: Document, path: Path) -> None:
     chunks: list[str] = []
+    for paragraph in document.headers:
+        text = paragraph.text.strip()
+        if text:
+            chunks.append(text)
     for block in document.blocks:
         if isinstance(block, Paragraph):
             text = block.text.strip()
@@ -194,10 +272,14 @@ def write_text(document: Document, path: Path) -> None:
                 chunks.append("\n".join(lines))
         elif isinstance(block, Table):
             rows = _table_text(block)
-            if rows:
+            if rows and _table_has_text(block):
                 chunks.append("\n".join("\t".join(cell for cell in row) for row in rows))
         elif isinstance(block, PageBreak):
             continue
+    for paragraph in document.footers:
+        text = paragraph.text.strip()
+        if text:
+            chunks.append(text)
     path.write_text("\n\n".join(chunks) + "\n", encoding="utf-8")
 
 
@@ -205,21 +287,49 @@ def write_text(document: Document, path: Path) -> None:
 
 def _html_table(table: Table) -> str:
     border = "1px solid #999" if table.borders else "none"
+    cols = table.col_count
     parts = ['<table style="border-collapse:collapse;width:100%">']
     if table.widths_pt:
         parts.append("<colgroup>")
         for width in table.widths_pt:
             parts.append(f'<col style="width:{width:g}pt">')
         parts.append("</colgroup>")
-    for index, row in enumerate(table.rows):
+    covered: set[tuple[int, int]] = set()
+    for row_index, row in enumerate(table.rows):
         parts.append("<tr>")
-        is_header = index < table.header_rows
+        is_header = row_index < table.header_rows
         tag = "th" if is_header else "td"
+        by_col: dict[int, object] = {}
+        fallback = 0
         for cell in row:
-            content = "<br>".join(_html_runs(_paragraph_runs(p)) for p in cell.paragraphs if p.text.strip())
+            col = cell.col if cell.col >= 0 else fallback
+            by_col[col] = cell
+            fallback = col + max(1, cell.col_span)
+        for col in range(cols):
+            if (row_index, col) in covered:
+                continue
+            cell = by_col.get(col)
+            if cell is None:
+                style = f"border:{border};padding:3pt 6pt"
+                parts.append(f'<{tag} style="{style}"></{tag}>')
+                continue
+            row_span = max(1, cell.row_span)
+            col_span = max(1, cell.col_span)
+            for rr in range(row_index, row_index + row_span):
+                for cc in range(col, col + col_span):
+                    covered.add((rr, cc))
+            content = "<br>".join(_html_runs(_paragraph_runs(p))
+                                  for p in cell.paragraphs if p.text.strip())
             align = cell.paragraphs[0].align if cell.paragraphs else "left"
+            if align not in _SAFE_ALIGN:
+                align = "left"
             style = f"border:{border};padding:3pt 6pt;text-align:{align}"
-            parts.append(f'<{tag} style="{style}">{content}</{tag}>')
+            span_attr = ""
+            if row_span > 1:
+                span_attr += f' rowspan="{row_span}"'
+            if col_span > 1:
+                span_attr += f' colspan="{col_span}"'
+            parts.append(f'<{tag}{span_attr} style="{style}">{content}</{tag}>')
         parts.append("</tr>")
     parts.append("</table>")
     return "".join(parts)
@@ -230,6 +340,13 @@ def write_html(document: Document, path: Path) -> None:
     if document.title:
         parts.append(f"<title>{_escape(document.title)}</title>")
     parts.append("</head><body>")
+    if document.headers:
+        parts.append("<header>")
+        for paragraph in document.headers:
+            content = _html_runs(_paragraph_runs(paragraph))
+            if content.strip():
+                parts.append(f"<p>{content}</p>")
+        parts.append("</header>")
     for block in document.blocks:
         if isinstance(block, Paragraph):
             content = _html_runs(_paragraph_runs(block))
@@ -253,10 +370,18 @@ def write_html(document: Document, path: Path) -> None:
                 parts.append(f"<li{indent}>{content}</li>")
             parts.append(f"</{tag}>")
         elif isinstance(block, Table):
-            parts.append(_html_table(block))
+            if _table_has_text(block):
+                parts.append(_html_table(block))
         elif isinstance(block, ImageBlock):
             payload = base64.b64encode(block.data).decode("ascii")
             parts.append(f'<p><img alt="image" src="data:image/{block.ext};base64,{payload}"></p>')
+    if document.footers:
+        parts.append("<footer>")
+        for paragraph in document.footers:
+            content = _html_runs(_paragraph_runs(paragraph))
+            if content.strip():
+                parts.append(f"<p>{content}</p>")
+        parts.append("</footer>")
     parts.append("</body></html>")
     path.write_text("\n".join(parts) + "\n", encoding="utf-8")
 
@@ -289,11 +414,34 @@ def _set_run(docx_run, run: Run) -> None:
             pass
 
 
+def _apply_hyperlink(docx_paragraph, docx_run, url: str) -> None:
+    """Trasforma un run appena aggiunto in `w:hyperlink` con relazione esterna."""
+    from docx.opc.constants import RELATIONSHIP_TYPE as RT
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
+
+    href = _safe_href(url)
+    if not href or href.startswith("#"):
+        return          # un'ancora non ha una destinazione nel nuovo documento
+    try:
+        r_id = docx_paragraph.part.relate_to(href, RT.HYPERLINK, is_external=True)
+    except Exception:
+        return
+    link = OxmlElement("w:hyperlink")
+    link.set(qn("r:id"), r_id)
+    element = docx_run._r
+    element.addprevious(link)
+    link.append(element)
+
+
 def _add_runs(docx_paragraph, runs: list[Run], fallback: Paragraph | None = None) -> None:
     if not runs and fallback is not None:
         runs = [Run(text=fallback.text, bold=fallback.bold, font=fallback.font, size=fallback.size)]
     for run in runs:
-        _set_run(docx_paragraph.add_run(), run)
+        docx_run = docx_paragraph.add_run()
+        _set_run(docx_run, run)
+        if run.link:
+            _apply_hyperlink(docx_paragraph, docx_run, run.link)
 
 
 def _set_paragraph_format(paragraph, source: Paragraph) -> None:
@@ -338,10 +486,35 @@ def _write_list(document, block: ListBlock) -> None:
             _set_paragraph_format(paragraph, item.paragraph)
 
 
+def _clear_cell(docx_cell) -> None:
+    """Svuota una cella lasciando un solo paragrafo vuoto (requisito Word)."""
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
+
+    tc = docx_cell._tc
+    for child in list(tc):
+        if child.tag != qn("w:tcPr"):
+            tc.remove(child)
+    tc.append(OxmlElement("w:p"))
+
+
+def _fill_cell(docx_cell, cell) -> None:
+    _clear_cell(docx_cell)
+    first = True
+    for source in cell.paragraphs:
+        runs = _paragraph_runs(source)
+        if not runs:
+            continue
+        target = docx_cell.paragraphs[0] if first else docx_cell.add_paragraph()
+        first = False
+        _add_runs(target, runs, source)
+        _set_paragraph_format(target, source)
+
+
 def _write_table(document, table: Table) -> None:
     from docx.shared import Pt
 
-    cols = max((len(row) for row in table.rows), default=0)
+    cols = table.col_count
     if not cols or not table.rows:
         return
     docx_table = document.add_table(rows=len(table.rows), cols=cols)
@@ -357,18 +530,22 @@ def _write_table(document, table: Table) -> None:
             docx_table.columns[index].width = width
             for row in docx_table.rows:
                 row.cells[index].width = width
+    last_row = len(table.rows) - 1
     for row_index, row in enumerate(table.rows):
-        for col_index, cell in enumerate(row[:cols]):
-            docx_cell = docx_table.cell(row_index, col_index)
-            first = True
-            for source in cell.paragraphs:
-                runs = _paragraph_runs(source)
-                if not runs:
-                    continue
-                target = docx_cell.paragraphs[0] if first else docx_cell.add_paragraph()
-                first = False
-                _add_runs(target, runs, source)
-                _set_paragraph_format(target, source)
+        fallback = 0
+        for cell in row:
+            col = cell.col if cell.col >= 0 else fallback
+            col_span = max(1, cell.col_span)
+            row_span = max(1, cell.row_span)
+            fallback = col + col_span
+            if col >= cols:
+                continue
+            end_col = min(cols - 1, col + col_span - 1)
+            end_row = min(last_row, row_index + row_span - 1)
+            target = docx_table.cell(row_index, col)
+            if end_row > row_index or end_col > col:
+                target = target.merge(docx_table.cell(end_row, end_col))
+            _fill_cell(target, cell)
 
 
 def _write_image(document, image: ImageBlock) -> None:
@@ -381,6 +558,28 @@ def _write_image(document, image: ImageBlock) -> None:
             document.add_picture(BytesIO(image.data))
     except Exception:
         pass   # flusso non supportato da Word (es. TIFF CCITT): non blocca il resto
+
+
+def _write_furniture(docx, document: Document) -> None:
+    """Testatina/piè di pagina della prima sezione, se l'IR li conserva."""
+    section = docx.sections[0]
+    for container, paragraphs in ((section.header, document.headers),
+                                  (section.footer, document.footers)):
+        if not paragraphs:
+            continue
+        existing = container.paragraphs
+        used_existing = False
+        for source in paragraphs:
+            runs = _paragraph_runs(source)
+            if not runs:
+                continue
+            if not used_existing and existing:
+                target = existing[0]
+                used_existing = True
+            else:
+                target = container.add_paragraph()
+            _add_runs(target, runs, source)
+            _set_paragraph_format(target, source)
 
 
 def write_docx(document: Document, path: Path, *, layout: str = "structure",
@@ -432,6 +631,7 @@ def write_docx(document: Document, path: Path, *, layout: str = "structure",
     # coda); non ne servono altri tra un blocco e l'altro.
     if document.blocks and isinstance(document.blocks[-1], Table):
         docx.add_paragraph()
+    _write_furniture(docx, document)
     docx.save(str(path))
 
 
@@ -474,7 +674,7 @@ def _with_marker(line, marker: str):
     from .types import Line
 
     runs = [Run(text=r.text, bold=r.bold, italic=r.italic, underline=r.underline,
-                font=r.font, size=r.size, color=r.color) for r in line.runs]
+                font=r.font, size=r.size, color=r.color, link=r.link) for r in line.runs]
     prefix = f"{marker} "
     if runs:
         runs[0].text = prefix + runs[0].text

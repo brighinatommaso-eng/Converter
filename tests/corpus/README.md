@@ -62,7 +62,9 @@ reading fails, the test fails: a document that used to work must keep working.
 - block order (reading order);
 - paragraphs: kind (`title` / `heading` / `body`), heading level, normalized text;
 - lists: ordered flag, item levels and text (markers excluded);
-- tables: full cell grid;
+- tables: the compact logical grid — one column per cell that actually starts in
+  it (columns covered only by a horizontal merge are not emitted), with the text
+  of a vertically merged cell repeated down the rows it covers;
 - images: width/height in points (the binary is not stored);
 - page breaks.
 
