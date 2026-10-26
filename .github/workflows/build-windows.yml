@@ -184,7 +184,7 @@ jobs:
             $cut = $body.IndexOf("## Verify the download")
             if ($cut -ge 0) { $body = $body.Substring(0, $cut) }
           } elseif ($env:GITHUB_REF_TYPE -eq "tag") {
-            throw "manca $notesFile: scrivi le note prima di creare il tag"
+            throw "manca ${notesFile}: scrivi le note prima di creare il tag"
           }
           $fence = '```'
           $body = $body.TrimEnd() + "`n`n## Verify the download`n`n$fence`n" + ($lines -join "`n") + "`n$fence`n"
