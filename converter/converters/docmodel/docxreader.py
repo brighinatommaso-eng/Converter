@@ -46,24 +46,74 @@ def _run_style(run, style) -> tuple[bool, bool, str, float, str]:
     return bold, italic, family, size, color
 
 
-def _iter_runs(docx_paragraph):
-    """(run, URL) nell'ordine del documento, hyperlink compresi.
+# Contenitori "trasparenti" di un paragrafo: il loro testo è testo del corpo.
+# w:ins = revisione inserita, w:fldSimple = risultato di un campo, w:sdt =
+# controllo contenuto, w:smartTag/w:customXml = marcature. w:del e w:moveFrom
+# (testo cancellato/spostato via) restano fuori, come in Word a revisioni accettate.
+_TRANSPARENT = {"ins", "moveTo", "smartTag", "customXml", "fldSimple", "sdt", "sdtContent",
+                "dir", "bdo"}
 
-    `paragraph.runs` salta completamente il testo dentro `w:hyperlink`: un
-    documento con un link perdeva quelle parole in Markdown e in TXT.
+
+def _local(tag) -> str:
+    return tag.rsplit("}", 1)[-1] if isinstance(tag, str) else ""
+
+
+def _flatten(element, wanted: str):
+    """Figli `wanted` di `element`, attraversando sdt/customXml/ins (righe e celle
+    dentro un controllo contenuto venivano saltate)."""
+    for child in element.iterchildren():
+        tag = _local(child.tag)
+        if tag == wanted:
+            yield child
+        elif tag in _TRANSPARENT:
+            yield from _flatten(child, wanted)
+
+
+def _iter_runs(docx_paragraph):
+    """(run, URL) nell'ordine del documento, ovunque si trovino nel paragrafo.
+
+    `paragraph.runs` (e `iter_inner_content`) vedono solo i `w:r` diretti e gli
+    hyperlink: il testo di una revisione inserita, del risultato di un campo o
+    di un controllo contenuto spariva in Markdown e in TXT senza avviso.
     """
     from docx.text.hyperlink import Hyperlink
+    from docx.text.run import Run as DocxRun
 
-    for item in docx_paragraph.iter_inner_content():
-        if isinstance(item, Hyperlink):
-            try:
-                link = item.url or ""
-            except Exception:
-                link = ""       # relazione rotta: il testo resta, il link no
-            for run in item.runs:
-                yield run, link
-        else:
-            yield item, ""
+    def walk(element, link: str):
+        for child in element.iterchildren():
+            tag = _local(child.tag)
+            if tag == "r":
+                yield DocxRun(child, docx_paragraph), link
+            elif tag == "hyperlink":
+                try:
+                    url = Hyperlink(child, docx_paragraph).url or ""
+                except Exception:
+                    url = ""       # relazione rotta: il testo resta, il link no
+                yield from walk(child, url or link)
+            elif tag in _TRANSPARENT:
+                yield from walk(child, link)
+
+    yield from walk(docx_paragraph._p, "")
+
+
+def _textbox_paragraphs(run, docx) -> list[Paragraph]:
+    """Paragrafi delle caselle di testo ancorate al run (w:txbxContent).
+
+    Word salva la casella due volte (mc:Choice moderna + mc:Fallback VML): si
+    legge solo la prima, altrimenti il testo comparirebbe doppio."""
+    from docx.oxml.ns import qn
+    from docx.text.paragraph import Paragraph as DocxParagraph
+
+    fallback = "{http://schemas.openxmlformats.org/markup-compatibility/2006}Fallback"
+    paragraphs: list[Paragraph] = []
+    for box in run._r.iter(qn("w:txbxContent")):
+        if any(ancestor.tag == fallback for ancestor in box.iterancestors()):
+            continue
+        for child in _flatten(box, "p"):
+            paragraph, _, _ = _paragraph(DocxParagraph(child, docx))
+            if paragraph.text.strip():
+                paragraphs.append(paragraph)
+    return paragraphs
 
 
 def _run_ir(run, style, link: str = "") -> Run | None:
@@ -140,7 +190,7 @@ def _images_from_run(run) -> list[ImageBlock]:
     return images
 
 
-def _paragraph_parts(docx_paragraph) -> tuple[list[Paragraph | ImageBlock], str]:
+def _paragraph_parts(docx_paragraph) -> tuple[list[Paragraph | ImageBlock], str, list[Paragraph]]:
     """Blocchi di un paragrafo, spezzati attorno alle immagini.
 
     Un'immagine inline non è testo: diventa un `ImageBlock` nello stesso punto
@@ -157,6 +207,7 @@ def _paragraph_parts(docx_paragraph) -> tuple[list[Paragraph | ImageBlock], str]
             blocks.append(_paragraph_from_runs(list(runs), style_name))
         runs.clear()
 
+    boxes: list[Paragraph] = []
     for item, link in _iter_runs(docx_paragraph):
         run = _run_ir(item, style, link)
         if run is not None:
@@ -164,20 +215,43 @@ def _paragraph_parts(docx_paragraph) -> tuple[list[Paragraph | ImageBlock], str]
         for image in _images_from_run(item):
             flush()
             blocks.append(image)
+        boxes.extend(_textbox_paragraphs(item, docx_paragraph._parent))
     flush()
-    return blocks, style_name
+    # Il testo delle caselle segue il paragrafo che le ancora (ordine di lettura):
+    # torna a parte perché non eredita lo stile (titolo/elenco) del paragrafo.
+    return blocks, style_name, boxes
 
 
 def _cell_paragraphs(tc, docx) -> list[Paragraph]:
-    """Paragrafi di una cella, leggendo il `w:tc` grezzo (merge inclusi)."""
-    from docx.oxml.ns import qn
+    """Paragrafi di una cella, leggendo il `w:tc` grezzo (merge inclusi).
+
+    Una tabella annidata non ha posto nella griglia dell'IR: ogni sua riga
+    diventa un paragrafo con le celle separate da tabulazione, così il testo
+    non sparisce (prima veniva ignorata del tutto)."""
     from docx.text.paragraph import Paragraph as DocxParagraph
 
     paragraphs = []
-    for child in tc.findall(qn("w:p")):
-        paragraph, _, _ = _paragraph(DocxParagraph(child, docx))
-        if paragraph.text.strip():
-            paragraphs.append(paragraph)
+    for child in tc.iterchildren():
+        tag = _local(child.tag)
+        if tag in _TRANSPARENT:
+            # Controllo contenuto/customXml attorno a paragrafi o tabelle della
+            # cella: si scende (sdtPr e simili non sono p/tbl e vengono ignorati).
+            paragraphs.extend(_cell_paragraphs(child, docx))
+            continue
+        if tag == "p":
+            paragraph, _, _ = _paragraph(DocxParagraph(child, docx))
+            if paragraph.text.strip():
+                paragraphs.append(paragraph)
+        elif tag == "tbl":
+            for tr in _flatten(child, "tr"):
+                runs: list[Run] = []
+                for inner_tc in _flatten(tr, "tc"):
+                    for inner in _cell_paragraphs(inner_tc, docx):
+                        if runs:
+                            runs.append(Run(text="\t"))
+                        runs.extend(run for line in inner.lines for run in line.runs)
+                if any(run.text.strip() for run in runs):
+                    paragraphs.append(Paragraph(lines=[Line(runs=runs)]))
     return paragraphs
 
 
@@ -213,12 +287,12 @@ def _table_rows(table, docx) -> list[list[TableCell]]:
     rows: list[list[TableCell]] = []
     active: dict[int, TableCell] = {}
 
-    for tr in table._tbl.tr_lst:
+    for tr in _flatten(table._tbl, "tr"):
         row: list[TableCell] = []
         continued: set[int] = set()
         started: set[int] = set()
         col = 0
-        for tc in tr.tc_lst:
+        for tc in _flatten(tr, "tc"):
             span = _grid_span(tc)
             merge = _vertical_merge(tc)
             if merge == "continue":
@@ -263,8 +337,8 @@ def _table_widths(table) -> list[float]:
     return [width for width in widths if width]
 
 
-def _numbering_info(docx_paragraph) -> tuple[bool, int] | None:
-    """(ordinato, livello) dal `w:numPr`, risolvendo il formato in numbering.xml.
+def _numbering_info(docx_paragraph) -> tuple[bool, int, int | None] | None:
+    """(ordinato, livello, numId) dal `w:numPr`, risolvendo il formato in numbering.xml.
 
     Word non mette "List Bullet/Number" nello stile: la maggior parte delle liste
     reali è `List Paragraph` + `w:numPr`. Senza questo, ogni voce diventa un
@@ -285,7 +359,7 @@ def _numbering_info(docx_paragraph) -> tuple[bool, int] | None:
     try:
         numbering = docx_paragraph.part.numbering_part.element
     except (AttributeError, NotImplementedError):
-        return ordered, level
+        return ordered, level, num_id
 
     abstract_id = None
     for num in numbering.findall(qn("w:num")):
@@ -294,7 +368,7 @@ def _numbering_info(docx_paragraph) -> tuple[bool, int] | None:
             abstract_id = ref.get(qn("w:val")) if ref is not None else None
             break
     if abstract_id is None:
-        return ordered, level
+        return ordered, level, num_id
 
     for abstract in numbering.findall(qn("w:abstractNum")):
         if abstract.get(qn("w:abstractNumId")) != abstract_id:
@@ -309,7 +383,7 @@ def _numbering_info(docx_paragraph) -> tuple[bool, int] | None:
         if fmt == "bullet":
             ordered = False
         break
-    return ordered, level
+    return ordered, level, num_id
 
 
 def _section_furniture(docx) -> tuple[list[Paragraph], list[Paragraph]]:
@@ -370,21 +444,28 @@ def read_docx(path: Path) -> Document:
         nonlocal pending_list
         pending_list = None
 
-    for child in docx.element.body.iterchildren():
-        if not isinstance(child.tag, str):
-            continue                     # commenti/PI: lxml usa una funzione come tag
-        tag = child.tag.rsplit("}", 1)[-1]
+    list_num_id: int | None = None   # numId del livello 1 dell'elenco aperto
+
+    def body_children(element):
+        """Figli del corpo, entrando nei controlli contenuto (w:sdt) a livello di
+        blocco: prima il loro testo (moduli, modelli, campi) veniva saltato."""
+        for child in element.iterchildren():
+            tag = _local(child.tag)
+            if tag in _TRANSPARENT:
+                yield from body_children(child)
+            elif tag in ("p", "tbl"):
+                yield tag, child
+
+    for tag, child in body_children(docx.element.body):
         if tag == "tbl":
             flush_list()
             table = DocxTable(child, docx)
             document.blocks.append(Table(rows=_table_rows(table, docx), borders=True,
                                          header_rows=1, widths_pt=_table_widths(table)))
             continue
-        if tag != "p":
-            continue
 
-        parts, style_name = _paragraph_parts(DocxParagraph(child, docx))
-        if not parts:
+        parts, style_name, boxes = _paragraph_parts(DocxParagraph(child, docx))
+        if not parts and not boxes:
             continue
         low = style_name.lower()
         is_heading = low == "title" or low.startswith("heading ")
@@ -396,7 +477,7 @@ def read_docx(path: Path) -> Document:
             if is_bullet_style or is_number_style:
                 suffix = low.split()[-1]
                 level = int(suffix) if suffix.isdigit() else 1
-                info = (is_number_style, level)
+                info = (is_number_style, level, None)
 
         for part in parts:
             if isinstance(part, ImageBlock):
@@ -408,15 +489,28 @@ def read_docx(path: Path) -> Document:
                 document.blocks.append(part)
                 continue
             if info is not None:
-                ordered, level = info
-                if pending_list is None or pending_list.ordered != ordered:
+                ordered, level, num_id = info
+                # Un elenco resta UNO anche se mescola voci numerate e puntate
+                # (sotto-punti): ogni voce porta il proprio tipo. Un nuovo numId
+                # al primo livello è invece un elenco Word distinto (riparte da 1).
+                new_list = (pending_list is None
+                            or (level == 1 and num_id is not None and list_num_id is not None
+                                and num_id != list_num_id))
+                if new_list:
                     pending_list = ListBlock(ordered=ordered)
                     document.blocks.append(pending_list)
+                    list_num_id = None
+                if level == 1 and num_id is not None:
+                    list_num_id = num_id
                 marker = "•" if not ordered else "1"
-                pending_list.items.append(ListItem(marker=marker, level=level, paragraph=part))
+                pending_list.items.append(ListItem(marker=marker, level=level, paragraph=part,
+                                                   ordered=ordered))
                 continue
             flush_list()
             document.blocks.append(part)
+        if boxes:
+            flush_list()
+            document.blocks.extend(boxes)
 
     if document.title == "":
         for block in document.blocks:

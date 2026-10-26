@@ -227,9 +227,9 @@ def _selftest(out_path: str | None) -> int:
             results["document txt->pdf"] = f"ERR {type(e).__name__}: {e}"
         # Filtro di export DOCX: esattamente quello che dava 'no export filter'.
         try:
-            results["document txt->docx"] = run_job(ConversionJob(txt, "txt", "docx", d / "a.docx")).ok
+            results["document txt->docx (pandoc/LibreOffice)"] = run_job(ConversionJob(txt, "txt", "docx", d / "a.docx")).ok
         except Exception as e:  # noqa: BLE001
-            results["document txt->docx"] = f"ERR {type(e).__name__}: {e}"
+            results["document txt->docx (pandoc/LibreOffice)"] = f"ERR {type(e).__name__}: {e}"
         # Input BINARIO (docx) + export filter (odt): import+export di un
         # documento Writer. (NB: pdf->docx NON è testato qui perché LibreOffice
         # non sa convertire un PDF in formati Writer — limite suo, non del bundle.)
@@ -257,9 +257,11 @@ def _selftest(out_path: str | None) -> int:
         except Exception as e:  # noqa: BLE001
             results["pdf struct writer-targets"] = f"ERR {type(e).__name__}: {e}"
     else:
-        for k in ("document txt->pdf", "document txt->docx", "document docx->odt",
+        for k in ("document txt->pdf", "document txt->docx (pandoc/LibreOffice)", "document docx->odt",
                   "document pdf->html", "pdf struct writer-targets"):
             results[k] = "SKIP no LibreOffice"
+
+    results.update(_selftest_honesty_checks(d, ff, gen_media))
 
     def good(v) -> bool:
         return v is True or (isinstance(v, str) and v.startswith("SKIP"))
@@ -274,6 +276,142 @@ def _selftest(out_path: str | None) -> int:
         sys.stdout.write(text)
     shutil.rmtree(d, ignore_errors=True)  # non lasciare la tmpdir a disco
     return 0 if ok else 1
+
+
+def _selftest_honesty_checks(d, ff, gen_media) -> dict[str, object]:
+    """Controlli del selftest sulle correzioni della review 2026-10-26.
+
+    Ogni voce verifica un comportamento che nel bundle dipende da librerie e
+    binari VERI (trimesh, Pillow, ffmpeg 8.x su Windows): un test in sorgente
+    non prova che il frozen faccia lo stesso. True = ok, "FAIL ..." altrimenti,
+    "SKIP ..." se manca il prerequisito (ffmpeg, trimesh)."""
+    import subprocess
+    from pathlib import Path
+
+    from converter.core.deps import clean_subprocess_env, find_ffprobe, has_module
+    from converter.core.detection import detect
+    from converter.core.job import ConversionJob
+    from converter.core.pipeline import run_job
+
+    out: dict[str, object] = {}
+    work = Path(d) / "honesty"
+    work.mkdir(exist_ok=True)
+
+    def check(name, fn) -> None:
+        try:
+            out[name] = fn()
+        except Exception as exc:  # noqa: BLE001  il selftest non deve mai sollevare
+            out[name] = f"ERR {type(exc).__name__}: {exc}"
+
+    # --- 3D: il bundle deve contenere i loader/exporter lazy di trimesh ---------
+    def mesh_roundtrip():
+        if not has_module("trimesh"):
+            return "SKIP no trimesh"
+        import trimesh
+
+        src = work / "box.stl"
+        trimesh.creation.box().export(str(src))
+        folder = work / "mesh_out"
+        folder.mkdir(exist_ok=True)
+        glb = run_job(ConversionJob(src, "stl", "glb", folder / "box.glb"))
+        if not glb.ok:
+            return f"FAIL stl->glb {glb.error}"
+        for name in ("a.gltf", "b.gltf"):
+            result = run_job(ConversionJob(src, "stl", "gltf", folder / name))
+            if not result.ok:
+                return f"FAIL stl->gltf {result.error}"
+        names = sorted(p.name for p in folder.iterdir())
+        if names != ["a.gltf", "b.gltf", "box.glb"]:
+            return f"FAIL side files written next to glTF: {names}"
+        return True
+
+    check("model3d stl->glb/gltf (self-contained)", mesh_roundtrip)
+
+    # --- Dati: CSV europeo con ';' -----------------------------------------------
+    def semicolon_csv():
+        import pandas as pd
+
+        src = work / "eu.csv"
+        src.write_text("nome;prezzo\nmela;1,50\n", encoding="cp1252")
+        target = work / "eu.xlsx"
+        result = run_job(ConversionJob(src, "csv", "xlsx", target))
+        if not result.ok:
+            return f"FAIL {result.error}"
+        columns = list(pd.read_excel(target, dtype=str).columns)
+        return True if columns == ["nome", "prezzo"] else f"FAIL columns={columns}"
+
+    check("data csv(;)->xlsx keeps columns", semicolon_csv)
+
+    # --- txt->md in-process (non deve dipendere da pandoc) -----------------------
+    def text_to_md():
+        src = work / "note.txt"
+        src.write_text("# not a heading\nline two\n", encoding="utf-8")
+        target = work / "note.md"
+        result = run_job(ConversionJob(src, "txt", "md", target))
+        if not (result.ok and result.verdict.is_lossless):
+            return f"FAIL {result.error or result.verdict.reason}"
+        text = target.read_text(encoding="utf-8")
+        return True if text.startswith("\\# not a heading\\\n") else f"FAIL {text!r}"
+
+    check("document txt->md escaped, lossless", text_to_md)
+
+    # --- Rilevamento testo-contro-testo e BMP -----------------------------------
+    def detection():
+        readme = work / "README.md"
+        readme.write_text("# Title\n\nAuthor: Tom\n\n- one\n", encoding="utf-8")
+        bmi = work / "bmi.csv"
+        bmi.write_text("BMI,age\n22.5,30\n", encoding="utf-8")
+        found = (detect(readme).format_id, detect(bmi).format_id)
+        return True if found == ("md", "csv") else f"FAIL detected {found}"
+
+    check("detection md/csv not yaml/bmp", detection)
+
+    # --- Audio: 24 bit resta 24 bit sotto LOSSLESS -------------------------------
+    def audio_depth():
+        if not ff or not find_ffprobe():
+            return "SKIP no ffmpeg/ffprobe"
+        src = work / "s24.wav"
+        gen_media(["-f", "lavfi", "-i", "sine=d=0.3", "-c:a", "pcm_s24le"], src)
+        target = work / "s24.flac"
+        result = run_job(ConversionJob(src, "wav", "flac", target))
+        if not (result.ok and result.verdict.is_lossless):
+            return f"FAIL {result.error or result.verdict.reason}"
+        probe = subprocess.run(
+            [find_ffprobe(), "-v", "quiet", "-select_streams", "a:0", "-show_entries",
+             "stream=bits_per_raw_sample", "-of", "csv=p=0", str(target)],
+            capture_output=True, text=True, env=clean_subprocess_env(),
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), timeout=15)
+        bits = probe.stdout.strip()
+        return True if bits == "24" else f"FAIL bits={bits!r}"
+
+    check("audio wav24->flac keeps 24-bit", audio_depth)
+
+    # --- Annulla: un job già annullato non parte ---------------------------------
+    def cancel():
+        from PIL import Image
+
+        src = work / "c.png"
+        Image.new("RGB", (4, 4)).save(src)
+        target = work / "c.jpg"
+        job = ConversionJob(src, "png", "jpg", target)
+        job.cancel.cancel()
+        result = run_job(job)
+        return True if result.cancelled and not target.exists() else f"FAIL {result}"
+
+    check("cancel skips a queued job", cancel)
+
+    # --- Licenze GPL accanto all'exe (solo da congelato) -------------------------
+    def licenses():
+        if not getattr(sys, "frozen", False):
+            return "SKIP not frozen"
+        root = Path(sys.executable).parent
+        needed = ["LICENSE", "THIRD_PARTY_NOTICES.md", "licenses/ffmpeg-GPLv3.txt",
+                  "licenses/pandoc-GPLv2.txt", "licenses/Qt-PySide6-LGPLv3.txt"]
+        missing = [name for name in needed if not (root / name).is_file()]
+        return True if not missing else f"FAIL missing {missing}"
+
+    check("license texts next to exe", licenses)
+    return out
 
 
 def _dumpenv(out_path: str | None) -> int:

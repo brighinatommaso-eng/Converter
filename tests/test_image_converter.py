@@ -92,3 +92,69 @@ def test_preserve_metadata_keeps_gps_exif(tmp_path):
     assert result.ok and out.exists()
     gps = _gps_ifd(out)
     assert gps.get(1) == "N" and gps.get(2) == (51.0, 30.0, 0.0)
+
+
+# --- Review 2026-10-26: frame, modi colore, icone ------------------------------
+
+def _run_image(src, s, d, out, **opts):
+    from converter.core.job import ConversionJob
+    from converter.core.pipeline import run_job
+    return run_job(ConversionJob(src, s, d, out, options=opts))
+
+
+def test_animated_webp_to_gif_keeps_every_frame(tmp_path):
+    frames = [Image.new("RGBA", (16, 16), (i * 60, 0, 0, 255)) for i in range(4)]
+    src = tmp_path / "anim.webp"
+    frames[0].save(src, save_all=True, append_images=frames[1:], duration=100, loop=0)
+    out = tmp_path / "anim.gif"
+    result = _run_image(src, "webp", "gif", out)
+    assert result.ok, result.error
+    assert Image.open(out).n_frames == 4
+
+
+def test_cmyk_jpeg_to_png_converts_and_declares_it(tmp_path):
+    src = tmp_path / "print.jpg"
+    Image.new("CMYK", (8, 8), (0, 100, 0, 0)).save(src)
+    out = tmp_path / "print.png"
+    result = _run_image(src, "jpg", "png", out)
+    assert result.ok, result.error
+    assert result.verdict.is_lossy and "CMYK" in result.verdict.reason
+    assert Image.open(out).mode == "RGB"
+
+
+def test_16bit_png_to_bmp_scales_instead_of_failing(tmp_path):
+    src = tmp_path / "deep.png"
+    image = Image.new("I;16", (4, 4))
+    image.putpixel((0, 0), 65535)
+    image.save(src)
+    out = tmp_path / "deep.bmp"
+    result = _run_image(src, "png", "bmp", out)
+    assert result.ok, result.error
+    assert result.verdict.is_lossy and "16-bit" in result.verdict.reason
+    assert Image.open(out).getpixel((0, 0)) == 255     # scalato, non saturato a caso
+
+
+def test_small_image_becomes_an_icon_of_the_requested_size(tmp_path):
+    src = tmp_path / "small.png"
+    Image.new("RGB", (32, 20), "blue").save(src)
+    out = tmp_path / "small.ico"
+    result = _run_image(src, "png", "ico", out, size=256)
+    assert result.ok, result.error
+    assert Image.open(out).size == (256, 256)
+
+
+def test_transparent_png_to_gif_keeps_transparency(tmp_path):
+    src = tmp_path / "t.png"
+    Image.new("RGBA", (8, 8), (255, 0, 0, 0)).save(src)
+    out = tmp_path / "t.gif"
+    assert _run_image(src, "png", "gif", out).ok
+    assert "transparency" in Image.open(out).info
+
+
+def test_transparent_png_to_bmp_declares_the_lost_alpha(tmp_path):
+    src = tmp_path / "t.png"
+    Image.new("RGBA", (4, 4), (1, 2, 3, 0)).save(src)
+    out = tmp_path / "t.bmp"
+    result = _run_image(src, "png", "bmp", out)
+    assert result.ok and result.verdict.is_lossy
+    assert "Transparency" in result.verdict.reason

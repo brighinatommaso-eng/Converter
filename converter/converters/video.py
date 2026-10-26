@@ -12,7 +12,7 @@ from ..core.job import ConversionJob, ConversionResult, ProgressCallback, Progre
 from ..core.options import ChoiceOption, IntOption, Option, TextOption
 from ..core.quality import QualityVerdict, lossy, unsupported
 from ..core.registry import register
-from ._ffmpeg import parse_time, probe_duration, run_ffmpeg
+from ._ffmpeg import parse_time, probe_duration, probe_streams, run_ffmpeg
 
 _INPUT = frozenset({"mp4", "mkv", "mov", "webm", "avi"})
 _OUTPUT = frozenset({"mp4", "mkv", "mov", "webm", "avi", "gif"})
@@ -82,6 +82,23 @@ def validate_video_options(opts: dict, duration: float | None) -> str | None:
 
     return None
 
+# Sottotitoli testuali (convertibili tra loro); PGS/DVB/DVD sono immagini.
+_TEXT_SUBTITLE_CODECS = {"subrip", "srt", "ass", "ssa", "mov_text", "webvtt", "text"}
+# Codec sottotitoli per contenitore; None = il contenitore non li regge.
+_SUBTITLE_CODEC = {"mkv": "copy", "mp4": "mov_text", "mov": "mov_text", "webm": "webvtt",
+                   "avi": None}
+
+
+def _trimmed_duration(opts: dict, duration: float | None) -> float | None:
+    """Durata dell'USCITA dopo il trim: con la durata intera il progresso si
+    fermava a metà barra su un taglio corto."""
+    if duration is None:
+        return None
+    start = parse_time(_field(opts, "trim_start")) or 0.0
+    end = parse_time(_field(opts, "trim_end")) or duration
+    return max(end - start, 0.1)
+
+
 # Codec video consentiti per ciascun contenitore (il primo è il default).
 _CODECS_BY_CONTAINER = {
     "mp4": ["h264", "h265"],
@@ -145,9 +162,11 @@ class VideoConverter(Converter):
             TextOption("trim_end", "Trim end", "", placeholder="e.g. 0:30",
                        help="Cut up to this point. Must be after start and within the video length."),
             TextOption("scale_w", "Custom width", "", placeholder="auto",
-                       help="Optional exact width in px (even number). Overrides Resolution."),
+                       help="Optional width in px (even number). Overrides Resolution; alone, "
+                                 "the height follows the aspect ratio."),
             TextOption("scale_h", "Custom height", "", placeholder="auto",
-                       help="Optional exact height in px (even number). Overrides Resolution."),
+                       help="Optional height in px (even number). Overrides Resolution; alone, "
+                                 "the width follows the aspect ratio."),
         ]
 
     # --- Validazione ---
@@ -168,10 +187,12 @@ class VideoConverter(Converter):
         duration = probe_duration(job.src_path)
         progress(ProgressEvent(0.05, "Converting video…"))
 
+        notes: list[str] = []
         if job.dst_format == "gif":
             args = self._gif_args(job)
         else:
-            args = self._video_args(job)
+            args, notes = self._video_args(job, probe_streams(job.src_path))
+            duration = _trimmed_duration(job.options, duration)
 
         if job.strip_metadata:
             args += ["-map_metadata", "-1"]
@@ -182,12 +203,39 @@ class VideoConverter(Converter):
             return ConversionResult(ok=False, error=err or f"FFmpeg exited with code {code}.")
 
         size = job.output_path.stat().st_size
+        verdict = self.verdict(job.src_format, job.dst_format)
+        if notes:
+            verdict = lossy(verdict.reason + " " + " ".join(notes))
         return ConversionResult(ok=True, output_path=job.output_path, output_size=size,
-                                verdict=self.verdict(job.src_format, job.dst_format))
+                                verdict=verdict)
 
-    def _video_args(self, job: ConversionJob) -> list[str]:
+    def _video_args(self, job: ConversionJob, streams: list[dict]) -> tuple[list[str], list[str]]:
+        """Argomenti ffmpeg + perdite da dichiarare nel verdetto.
+
+        Mappatura esplicita: la selezione automatica di ffmpeg teneva UNA traccia
+        audio (le altre lingue sparivano) e un solo sottotitolo, e un sottotitolo
+        a immagine (PGS/DVD) verso mp4 faceva fallire l'intera conversione."""
         opts = job.options
-        args = ["-i", str(job.src_path)]
+        dst = job.dst_format
+        args = ["-i", str(job.src_path), "-map", "0:V:0", "-map", "0:a?"]
+        notes: list[str] = []
+
+        audio_tracks = sum(1 for stream in streams if stream["type"] == "audio")
+        subtitles = [stream for stream in streams if stream["type"] == "subtitle"]
+        text_subs = [stream for stream in subtitles if stream["codec"] in _TEXT_SUBTITLE_CODECS]
+        sub_codec = _SUBTITLE_CODEC.get(dst)
+        kept_subs = subtitles if dst == "mkv" else (text_subs if sub_codec else [])
+        for stream in kept_subs:
+            args += ["-map", f"0:{stream['index']}"]
+        if kept_subs:
+            args += ["-c:s", sub_codec]
+        dropped = len(subtitles) - len(kept_subs)
+        if dropped:
+            why = (f"{dst.upper()} cannot hold subtitles" if not sub_codec else
+                   f"{dst.upper()} can only hold text subtitles")
+            notes.append(f"{dropped} subtitle track(s) were left out ({why}).")
+        if dst == "mkv":
+            args += ["-map", "0:t?", "-c:t", "copy"]   # font allegati ai sottotitoli ASS
 
         # Trim: -ss/-to come opzioni di output (timeline del sorgente). I valori
         # sono già stati validati da validate(), quindi qui ci si fida del parsing.
@@ -197,13 +245,19 @@ class VideoConverter(Converter):
         if end_raw:
             args += ["-to", str(parse_time(end_raw))]
 
-        args += _video_codec_args(opts.get("codec", "h264"), int(opts.get("crf", 18)))
+        # Il codec deve essere ammesso dal contenitore: senza opzioni (CLI, preset
+        # vecchi) il default fisso "h264" rendeva webm impossibile da scrivere.
+        allowed = _CODECS_BY_CONTAINER.get(dst, ["h264"])
+        codec = opts.get("codec") if opts.get("codec") in allowed else allowed[0]
+        args += _video_codec_args(codec, int(opts.get("crf", 18)))
+        if codec == "h265" and dst in ("mp4", "mov"):
+            args += ["-tag:v", "hvc1"]   # senza, QuickTime/iOS/macOS non riproducono l'HEVC
 
-        # Scala: dimensioni esatte custom (se entrambe date) hanno precedenza;
-        # altrimenti la risoluzione dropdown con -2 (aspect ratio, lato pari).
+        # Scala: dimensioni custom (anche una sola: l'altra segue le proporzioni,
+        # lato pari) hanno precedenza; altrimenti la risoluzione del menu.
         scale_w, scale_h = _field(opts, "scale_w"), _field(opts, "scale_h")
-        if scale_w and scale_h:
-            args += ["-vf", f"scale={scale_w}:{scale_h}"]
+        if scale_w or scale_h:
+            args += ["-vf", f"scale={scale_w or -2}:{scale_h or -2}"]
         elif opts.get("resolution", "original") != "original":
             args += ["-vf", f"scale=-2:{opts['resolution']}"]
 
@@ -211,9 +265,11 @@ class VideoConverter(Converter):
         if fps_raw and fps_raw != "original":
             args += ["-r", fps_raw]
 
-        # Audio: Opus per webm, AAC altrimenti.
-        args += ["-c:a", "libopus"] if job.dst_format == "webm" else ["-c:a", "aac", "-b:a", "192k"]
-        return args
+        # Audio: Opus per webm, AAC altrimenti — TUTTE le tracce, non solo la prima.
+        args += ["-c:a", "libopus"] if dst == "webm" else ["-c:a", "aac", "-b:a", "192k"]
+        if audio_tracks > 1 and dst == "avi":
+            notes.append("AVI players usually play only the first of the audio tracks.")
+        return args, notes
 
     def _gif_args(self, job: ConversionJob) -> list[str]:
         opts = job.options

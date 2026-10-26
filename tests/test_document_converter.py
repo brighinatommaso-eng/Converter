@@ -342,7 +342,9 @@ def test_clean_subprocess_env_frozen_purges_bundle_from_path(monkeypatch, tmp_pa
     monkeypatch.setattr(deps.sys, "frozen", True, raising=False)
     monkeypatch.setattr(deps.sys, "_MEIPASS", str(meipass), raising=False)
 
-    sysdir = r"C:\Windows\System32"
+    # Una cartella di sistema valida sull'OS corrente: con "C:\\..." su Linux il
+    # separatore ':' spezzava il percorso e il test falliva per motivi suoi.
+    sysdir = str(tmp_path / "system32")
     monkeypatch.setenv("PATH", str(meipass) + os.pathsep + sysdir)
     monkeypatch.setenv("LD_LIBRARY_PATH", str(meipass))
     monkeypatch.setenv("LD_LIBRARY_PATH_ORIG", "/usr/lib")

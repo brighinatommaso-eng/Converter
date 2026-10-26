@@ -53,6 +53,21 @@ def _ftyp_brand(head: bytes) -> str | None:
     return "mp4"
 
 
+# Dimensioni valide dell'header DIB (BITMAPCOREHEADER … BITMAPV5HEADER).
+_BMP_DIB_SIZES = {12, 16, 40, 52, 56, 64, 108, 124}
+
+
+def _is_bmp_header(head: bytes) -> bool:
+    """'BM' da solo sono due lettere: un CSV con intestazione "BMI,age" veniva
+    preso per un'immagine. Un BMP vero ha i byte riservati a zero e una
+    dimensione di header DIB nota."""
+    if len(head) < 18:
+        return False
+    reserved = head[6:10]
+    dib_size = int.from_bytes(head[14:18], "little")
+    return reserved == b"\x00\x00\x00\x00" and dib_size in _BMP_DIB_SIZES
+
+
 def _magic(head: bytes) -> str | None:
     """Firme binarie hand-rolled: più affidabili delle librerie per i nostri formati."""
     if head.startswith(b"\x89PNG\r\n\x1a\n"):
@@ -61,7 +76,7 @@ def _magic(head: bytes) -> str | None:
         return "jpg"
     if head.startswith(b"GIF87a") or head.startswith(b"GIF89a"):
         return "gif"
-    if head.startswith(b"BM"):
+    if head.startswith(b"BM") and _is_bmp_header(head):
         return "bmp"
     if head.startswith(b"II*\x00") or head.startswith(b"MM\x00*"):
         return "tiff"
@@ -194,8 +209,8 @@ def _sniff_text(head: bytes) -> str | None:
             dialect = csv.Sniffer().sniff(sample, delimiters=",\t;|")
             if dialect.delimiter == "\t":
                 return "tsv"
-            if dialect.delimiter == ",":
-                return "csv"
+            if dialect.delimiter in ",;|":
+                return "csv"   # ';' è il separatore dei CSV europei
         except csv.Error:
             pass
         if "\t" in sample and "," not in sample:
@@ -222,6 +237,11 @@ def _is_gltf(obj) -> bool:
     nodes. Richiederle evita di rubare i generici file .json alla categoria dati."""
     return (isinstance(obj, dict) and "asset" in obj
             and any(k in obj for k in ("meshes", "scenes", "nodes")))
+
+
+# Sniff testuali deboli: battuti da un'estensione di testo diversa.
+_WEAK_TEXT_SNIFFS = {"yaml", "csv", "tsv"}
+_TEXT_FORMATS = {"md", "txt", "html", "csv", "tsv", "yaml", "json", "xml", "svg", "rtf"}
 
 
 def detect(path: str | Path) -> DetectedFormat:
@@ -257,11 +277,18 @@ def detect(path: str | Path) -> DetectedFormat:
             if _is_gltf(obj):
                 return DetectedFormat("gltf", "model3d", 0.9, "gltf-json")
             return DetectedFormat("json", "data", 0.9, "json-parse")
+    ext_fmt = by_extension(path.suffix)
+    if fmt in _WEAK_TEXT_SNIFFS and ext_fmt in _TEXT_FORMATS and ext_fmt != fmt:
+        # Testo contro testo: lo sniff yaml/csv/tsv è un'euristica debole (un
+        # README.md con elenchi o righe "Chiave: valore" sembra YAML, una
+        # lettera con virgole sembra CSV). Il contenuto resta la prova per i
+        # formati binari e per json/xml che si parsano davvero; qui decide
+        # l'estensione dichiarata dall'utente.
+        return DetectedFormat(ext_fmt, category_of(ext_fmt), 0.6, "extension-text")
     if fmt:
         return DetectedFormat(fmt, category_of(fmt), 0.7, "text-sniff")
 
     # Ultimo indizio: l'estensione, con bassa confidenza.
-    ext_fmt = by_extension(path.suffix)
     if ext_fmt:
         return DetectedFormat(ext_fmt, category_of(ext_fmt), 0.3, "extension")
 
