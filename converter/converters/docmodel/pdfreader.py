@@ -41,6 +41,7 @@ from .types import (
 _RULE_THICKNESS = 2.5      # una linea più sottile di così è una riga di griglia
 _MIN_RULE_LEN = 15.0
 _RULE_TOUCH = 2.0          # tolleranza perché due segmenti si considerino connessi
+_GRID_CELL = 48.0          # lato della cella della griglia spaziale dei segmenti
 _GRID_TOL = 2.5            # tolleranza per fondere due coordinate di griglia
 _COLUMN_GAP = 10.0         # spazio orizzontale che separa due colonne di testo
 _BLOCK_GAP = 8.0           # spazio verticale minimo per un taglio orizzontale
@@ -359,13 +360,30 @@ def _connected_components(segments: list[tuple[str, tuple[float, float, float, f
         _, (x0, y0, x1, y1) = seg
         return x0, y0, x1, y1
 
-    for i in range(len(segments)):
-        ax0, ay0, ax1, ay1 = bbox(segments[i])
-        for j in range(i + 1, len(segments)):
-            bx0, by0, bx1, by1 = bbox(segments[j])
-            if (ax0 - _RULE_TOUCH <= bx1 and bx0 - _RULE_TOUCH <= ax1
-                    and ay0 - _RULE_TOUCH <= by1 and by0 - _RULE_TOUCH <= ay1):
-                union(i, j)
+    # Griglia spaziale: si confrontano solo i segmenti che condividono una
+    # cella. Il confronto di TUTTE le coppie era O(n²) in Python puro: una
+    # tavola CAD o una mappa con migliaia di linee costava minuti per pagina.
+    buckets: dict[tuple[int, int], list[int]] = {}
+    for index, segment in enumerate(segments):
+        x0, y0, x1, y1 = bbox(segment)
+        for cx in range(int((x0 - _RULE_TOUCH) // _GRID_CELL), int((x1 + _RULE_TOUCH) // _GRID_CELL) + 1):
+            for cy in range(int((y0 - _RULE_TOUCH) // _GRID_CELL),
+                            int((y1 + _RULE_TOUCH) // _GRID_CELL) + 1):
+                buckets.setdefault((cx, cy), []).append(index)
+
+    checked: set[tuple[int, int]] = set()
+    for members in buckets.values():
+        for position, i in enumerate(members):
+            ax0, ay0, ax1, ay1 = bbox(segments[i])
+            for j in members[position + 1:]:
+                pair = (i, j) if i < j else (j, i)
+                if pair in checked:
+                    continue
+                checked.add(pair)
+                bx0, by0, bx1, by1 = bbox(segments[j])
+                if (ax0 - _RULE_TOUCH <= bx1 and bx0 - _RULE_TOUCH <= ax1
+                        and ay0 - _RULE_TOUCH <= by1 and by0 - _RULE_TOUCH <= ay1):
+                    union(i, j)
 
     groups: dict[int, list[int]] = {}
     for index in range(len(segments)):
@@ -1223,12 +1241,12 @@ def _remove_prefix(paragraph: Paragraph, marker: str) -> None:
     for run in paragraph.lines[0].runs:
         if remaining <= 0:
             break
+        # Lo spazio PRIMA del marcatore non fa parte del marcatore: sottrarlo
+        # lasciava il proiettile nel testo ("- • voce" in Markdown).
         stripped = run.text.lstrip()
-        skipped = len(run.text) - len(stripped)
-        remaining -= skipped
-        if remaining <= 0:
-            run.text = stripped
-            break
+        if not stripped:
+            run.text = ""
+            continue
         if len(stripped) >= remaining:
             run.text = stripped[remaining:]
             remaining = 0
@@ -1254,12 +1272,16 @@ def _group_lists(blocks: list) -> list:
             result.append(block)
             continue
         marker, ordered = marker_info
-        if current is None or current.ordered != ordered:
-            current = ListBlock(ordered=ordered)
-            result.append(current)
         # Il livello viene dal rientro DENTRO la colonna (indent_pt), non dal
         # margine della pagina: nella colonna destra ogni voce finiva al livello 5.
-        level = 1 + max(0, int(round((block.indent_pt - 8) / 18.0)))
+        level = min(1 + max(0, int(round((block.indent_pt - 8) / 18.0))), 5)
+        # Una sotto-voce di tipo diverso (punti sotto un elenco numerato) resta
+        # nello stesso elenco: spezzarlo faceva ripartire la numerazione da 1.
+        top = min((item.level for item in current.items), default=level) if current else level
+        if current is None or (current.ordered != ordered and level <= top):
+            current = ListBlock(ordered=ordered)
+            result.append(current)
         _remove_prefix(block, marker)
-        current.items.append(ListItem(marker=marker, level=min(level, 5), paragraph=block))
+        current.items.append(ListItem(marker=marker, level=level, paragraph=block,
+                                      ordered=ordered))
     return result

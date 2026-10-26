@@ -122,7 +122,10 @@ def test_unwritable_output_folder_fails_the_row_without_wedging(tmp_path):
     win = MainWindow()
     win.output_dir = blocked
     win.same_as_source = False
-    win._add_paths([png])               # default: png → bmp (lossless, niente dialog)
+    win._add_paths([png])
+    item = win.model.items[0]
+    item.dst_format = "bmp"             # lossless → niente dialog confirm_lossy
+    item.verdict = next(t.verdict for t in item.targets if t.dst_format == "bmp")
 
     win._convert_all()                  # non deve sollevare
 
@@ -150,11 +153,12 @@ def test_changing_target_rearms_a_completed_row(tmp_path):
     item.output_path = tmp_path / "old.bmp"
     assert win.model.items_to_convert() == []
 
-    idx = win.options._target_combo.findData("jpg")
+    # Un target DIVERSO dal default (png → jpg), così il combo emette changed.
+    idx = win.options._target_combo.findData("bmp")
     assert idx >= 0
     win.options._target_combo.setCurrentIndex(idx)  # emette changed
 
-    assert item.dst_format == "jpg"
+    assert item.dst_format == "bmp"
     assert item.status == "Ready"
     assert item.out_size is None and item.output_path is None
     assert win.model.items_to_convert() == [item]
@@ -177,3 +181,75 @@ def test_cancelled_job_shows_cancelled_not_failed(tmp_path, monkeypatch):
     assert win.model.items[0].convertible            # si può riconvertire
     assert recorded == []
     assert "1 cancelled" in win.status.text()
+
+
+def test_default_targets_follow_common_use_not_the_alphabet(tmp_path):
+    """Prima vinceva il primo lossless in ordine alfabetico: ogni foto → BMP."""
+    jpg = tmp_path / "photo.jpg"
+    png = tmp_path / "shot.png"
+    Image.new("RGB", (8, 8)).save(jpg)
+    Image.new("RGB", (8, 8)).save(png)
+    win = MainWindow()
+    win._add_paths([jpg, png])
+    assert [it.dst_format for it in win.model.items] == ["png", "jpg"]
+
+
+def test_typed_output_folder_is_used(tmp_path):
+    """Un percorso digitato nel campo veniva ignorato (solo Browse contava)."""
+    png = tmp_path / "a.png"
+    Image.new("RGB", (8, 8)).save(png)
+    typed = tmp_path / "typed"
+    win = MainWindow()
+    win.same_chk.setChecked(False)
+    win.out_edit.setText(str(typed))
+    win._add_paths([png])
+    item = win.model.items[0]
+    item.dst_format = "bmp"
+    item.verdict = next(t.verdict for t in item.targets if t.dst_format == "bmp")
+    win._convert_all()
+    assert item.output_path.parent == typed
+    win._cancel_all()
+    _app.processEvents()
+
+
+def test_missing_output_folder_is_reported_not_silently_replaced(tmp_path):
+    png = tmp_path / "a.png"
+    Image.new("RGB", (8, 8)).save(png)
+    win = MainWindow()
+    win.same_chk.setChecked(False)
+    win._add_paths([png])
+    win._convert_all()
+    assert win.model.items[0].output_path is None
+    assert "output folder" in win.status.text()
+
+
+def test_size_estimate_runs_off_the_ui_thread(tmp_path, monkeypatch):
+    """estimate_size (ffprobe, fino a 15 s) girava nel thread UI a ogni modifica."""
+    import time
+    import wave
+
+    from converter.converters.audio import AudioConverter
+
+    src = tmp_path / "a.wav"
+    with wave.open(str(src), "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(8000)
+        handle.writeframes(b"\x00\x00" * 800)
+
+    def slow_estimate(self, job):
+        time.sleep(0.5)
+        return 4321
+
+    monkeypatch.setattr(AudioConverter, "estimate_size", slow_estimate)
+    win = MainWindow()
+    win._add_paths([src])
+    item = win.model.items[0]
+    started = time.monotonic()
+    win.options.set_item(item)
+    assert time.monotonic() - started < 0.4          # il pannello non aspetta ffprobe
+    deadline = time.monotonic() + 5
+    while item.est_size is None and time.monotonic() < deadline:
+        _app.processEvents()
+        time.sleep(0.02)
+    assert item.est_size == 4321

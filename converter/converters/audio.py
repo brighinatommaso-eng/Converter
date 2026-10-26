@@ -14,7 +14,7 @@ from ..core.job import ConversionJob, ConversionResult, ProgressCallback, Progre
 from ..core.options import BoolOption, ChoiceOption, Option
 from ..core.quality import QualityVerdict, lossless, lossy, unsupported
 from ..core.registry import register
-from ._ffmpeg import probe_audio, probe_duration, run_ffmpeg
+from ._ffmpeg import probe_audio, probe_duration, probe_streams, run_ffmpeg
 
 _FORMATS = frozenset({"mp3", "wav", "flac", "aac", "ogg", "m4a", "opus"})
 _LOSSLESS = {"wav", "flac"}
@@ -80,6 +80,9 @@ _CODEC = {
     "flac": ["-c:a", "flac"],
     "wav": ["-c:a", "pcm_s16le"],  # solo fallback: il piano reale è in _lossless_plan
 }
+
+# Contenitori che reggono una copertina (ID3 APIC, FLAC PICTURE, MP4 covr).
+_COVER_DST = ("mp3", "flac", "m4a")
 
 # Codec sorgente già lossless: i loro campioni sono i dati originali.
 _LOSSLESS_SRC_CODECS = ("pcm_", "flac", "alac", "wavpack", "tta", "ape")
@@ -234,11 +237,20 @@ class AudioConverter(Converter):
 
     def convert(self, job: ConversionJob, progress: ProgressCallback) -> ConversionResult:
         duration = probe_duration(job.src_path)
-        args = ["-i", str(job.src_path)]
+        info = probe_audio(job.src_path)
+        # Prima traccia audio esplicita: con la mappatura automatica una
+        # copertina (stream video) poteva finire nel file o farlo fallire.
+        args = ["-i", str(job.src_path), "-map", "0:a:0"]
 
         opts = job.options
         if opts.get("sample_rate", "original") != "original":
             args += ["-ar", str(opts["sample_rate"])]
+        elif opts.get("normalize") and info and info.get("sample_rate"):
+            # loudnorm lavora (ed esce) a 192 kHz: senza -ar un WAV/FLAC
+            # normalizzato usciva a 192 kHz, 4 volte più grande e ricampionato.
+            allowed = _CODEC_SAMPLE_RATES.get(job.dst_format)
+            if allowed is None or info["sample_rate"] in allowed:
+                args += ["-ar", str(info["sample_rate"])]
         if opts.get("channels", "original") != "original":
             args += ["-ac", str(opts["channels"])]
 
@@ -249,7 +261,7 @@ class AudioConverter(Converter):
         loss_reason = None
         if job.dst_format in _LOSSLESS:
             codec_args, loss_reason = _lossless_plan(
-                job.dst_format, probe_audio(job.src_path), str(opts.get("bit_depth", "source")))
+                job.dst_format, info, str(opts.get("bit_depth", "source")))
             args += codec_args
         else:
             args += _CODEC[job.dst_format]
@@ -258,8 +270,11 @@ class AudioConverter(Converter):
         # Metadati (ID3/tag): -map_metadata -1 li rimuove se richiesto lo strip.
         if job.strip_metadata:
             args += ["-map_metadata", "-1"]
-        if job.dst_format != "wav":
-            args += ["-vn"]  # niente eventuali cover/stream video
+        elif job.dst_format in _COVER_DST and any(
+                stream["attached_pic"] for stream in probe_streams(job.src_path)):
+            # La copertina è un metadato come i tag: si conserva (copiata, non
+            # ricodificata) dove il contenitore la regge. Prima -vn la toglieva sempre.
+            args += ["-map", "0:v:0", "-c:v", "copy", "-disposition:v:0", "attached_pic"]
 
         args += [str(job.output_path)]
 

@@ -51,7 +51,32 @@ def parse_time(text: str) -> float | None:
 
 
 def probe_duration(path: Path) -> float | None:
-    """Durata del media in secondi, o None se non determinabile."""
+    """Durata del media in secondi, o None se non determinabile.
+
+    Memorizzata per (percorso, mtime, dimensione): la stima della GUI, validate()
+    e convert() la chiedevano più volte per lo stesso file, ognuna con ffprobe."""
+    try:
+        stat = Path(path).stat()
+        key = (str(path), stat.st_mtime_ns, stat.st_size)
+    except OSError:
+        return _probe_duration_uncached(path)
+    with _DURATION_LOCK:
+        if key in _DURATIONS:
+            return _DURATIONS[key]
+    duration = _probe_duration_uncached(path)
+    if duration is not None:     # "ignota" non si memorizza: ffprobe può arrivare dopo
+        with _DURATION_LOCK:
+            if len(_DURATIONS) >= 256:
+                _DURATIONS.pop(next(iter(_DURATIONS)))
+            _DURATIONS[key] = duration
+    return duration
+
+
+_DURATIONS: dict[tuple[str, int, int], float] = {}
+_DURATION_LOCK = threading.Lock()
+
+
+def _probe_duration_uncached(path: Path) -> float | None:
     ffprobe = find_ffprobe()
     if not ffprobe:
         return None
@@ -67,6 +92,29 @@ def probe_duration(path: Path) -> float | None:
         # subprocess.TimeoutExpired è una SubprocessError: un ffprobe appeso viene
         # killato da subprocess.run e qui si degrada a None (durata non nota).
         return None
+
+
+def probe_streams(path: Path) -> list[dict]:
+    """Tutti gli stream del file ({'index','type','codec','attached_pic'}), [] se ignoti.
+
+    Serve a decidere cosa mappare: tracce audio multiple, sottotitoli testuali
+    o a immagine, copertine (attached_pic) dei file audio."""
+    ffprobe = find_ffprobe()
+    if not ffprobe:
+        return []
+    try:
+        out = subprocess.run(
+            [ffprobe, "-v", "quiet", "-print_format", "json", "-show_streams", str(path)],
+            capture_output=True, text=True, creationflags=_NO_WINDOW,
+            env=clean_subprocess_env(), timeout=_PROBE_TIMEOUT,
+        )
+        streams = json.loads(out.stdout or "{}").get("streams") or []
+    except (subprocess.SubprocessError, ValueError, json.JSONDecodeError):
+        return []
+    return [{"index": stream.get("index"), "type": stream.get("codec_type", ""),
+             "codec": stream.get("codec_name", ""),
+             "attached_pic": bool((stream.get("disposition") or {}).get("attached_pic"))}
+            for stream in streams]
 
 
 def probe_audio(path: Path) -> dict | None:
@@ -100,8 +148,13 @@ def probe_audio(path: Path) -> dict | None:
             bits = 0
         if bits:
             break
+    try:
+        rate = int(stream.get("sample_rate") or 0)
+    except (TypeError, ValueError):
+        rate = 0
     return {"codec": str(stream.get("codec_name") or ""),
-            "sample_fmt": str(stream.get("sample_fmt") or ""), "bits": bits}
+            "sample_fmt": str(stream.get("sample_fmt") or ""), "bits": bits,
+            "sample_rate": rate}
 
 
 def run_ffmpeg(

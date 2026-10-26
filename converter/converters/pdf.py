@@ -1,12 +1,9 @@
-"""Converter PDF basato su pdfminer.six (pure-Python, MIT).
+"""Converter PDF basato su pdfminer.six (pure-Python, MIT): ripiego per pdf→txt/html.
 
-Estrae testo e una resa HTML *strutturale* da un PDF. Funziona in ENTRAMBE le
-modalità (nessun tool esterno): pdfminer è più pulito dell'import "PDF come Draw"
-di LibreOffice per questi due target, e tiene un solo percorso di codice. Per
-questo ha priorità alta e vince pdf→txt / pdf→html anche in modalità FULL.
-
-pdf→{docx,odt,rtf} resta non supportato (nessun percorso fedele esiste): quei
-target restano in grigio come prima.
+Le coppie pdf→txt/html sono rivendicate a priorità più alta da `textdoc.py`
+(motore strutturale: titoli, elenchi, tabelle). Questo converter vince solo se
+il motore strutturale non è disponibile (python-docx assente): estrae il testo
+e una resa HTML semplice, senza struttura. Funziona in ENTRAMBE le modalità.
 """
 
 from __future__ import annotations
@@ -27,7 +24,7 @@ class PdfConverter(Converter):
     name = "PDF text/HTML (pdfminer)"
     input_formats = frozenset({"pdf"})
     output_formats = _OUTPUTS
-    priority = 10  # vince su LibreOffice per pdf→txt/pdf→html in entrambe le modalità
+    priority = 10  # sotto textdoc (20), sopra LibreOffice: ripiego senza python-docx
 
     @classmethod
     def available(cls) -> DependencyStatus:

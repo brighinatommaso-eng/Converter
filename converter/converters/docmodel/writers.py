@@ -110,9 +110,31 @@ def _para_align_style(paragraph: Paragraph) -> str:
     return ";".join(parts)
 
 
+# Caratteri che Markdown interpreta ovunque nella riga (CommonMark/GFM).
+_MD_INLINE = re.compile(r"([\\`*_\[\]<>|~&])")
+# Costrutti che contano solo a inizio riga: titolo, elenco, citazione, setext.
+_MD_LINE_START = re.compile(r"^(\s*)([#+\-=>])")
+_MD_ORDERED_START = re.compile(r"^(\s*\d{1,9})([.)])")
+
+
 def _md_escape(text: str) -> str:
-    return (text.replace("\\", "\\\\").replace("|", "\\|")
-            .replace("[", "\\[").replace("]", "\\]").replace("\n", " "))
+    """Testo letterale in Markdown: niente enfasi, link, HTML o celle spezzate.
+
+    Prima si escapavano solo `\\ | [ ]`: "# riga" diventava un titolo, `*x*`
+    corsivo, `<b>` HTML vivo e il `|` di una cella aggiungeva una colonna."""
+    return _MD_INLINE.sub(r"\\\1", text).replace("\r", " ").replace("\n", " ")
+
+
+def _md_block_escape(text: str) -> str:
+    """Escape dei costrutti di blocco a inizio paragrafo (dopo l'escape inline)."""
+    text = _MD_LINE_START.sub(lambda m: m.group(1) + "\\" + m.group(2), text, count=1)
+    return _MD_ORDERED_START.sub(lambda m: m.group(1) + "\\" + m.group(2), text, count=1)
+
+
+def _md_heading_text(text: str) -> str:
+    """Un titolo ATX che finisce con '#' perderebbe il cancelletto (sequenza di
+    chiusura): "C #" diventava "C"."""
+    return text[:-1] + "\\#" if text.endswith("#") and not text.endswith("\\#") else text
 
 
 def _md_url(url: str) -> str:
@@ -127,14 +149,19 @@ def _md_runs(runs: list[Run], *, heading: bool = False) -> str:
         if not text.strip():
             out.append(text)
             continue
+        # Gli spazi ai bordi vanno FUORI dai delimitatori: "**parola **" non è
+        # grassetto in CommonMark e il lettore vedeva gli asterischi.
+        core = text.strip()
+        lead = text[: len(text) - len(text.lstrip())]
+        trail = text[len(text.rstrip()):]
         if run.italic:
-            text = f"*{text}*"
+            core = f"*{core}*"
         if run.bold and not heading:   # un heading è già enfatizzato: ** è rumore
-            text = f"**{text}**"
+            core = f"**{core}**"
         href = _safe_href(run.link)
         if href:
-            text = f"[{text}](<{_md_url(href)}>)"
-        out.append(text)
+            core = f"[{core}](<{_md_url(href)}>)"
+        out.append(lead + core + trail)
     return "".join(out)
 
 
@@ -184,12 +211,98 @@ def _table_has_text(table: Table) -> bool:
                for row in table.rows for cell in row for paragraph in cell.paragraphs)
 
 
+# --- Immagini e liste comuni -------------------------------------------------
+
+# Formati che un browser (e quindi md/html) mostra davvero, col MIME corretto.
+_WEB_IMAGE_MIME = {
+    "png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg", "gif": "image/gif",
+    "bmp": "image/bmp", "webp": "image/webp", "svg": "image/svg+xml",
+}
+
+
+def _png_from(data: bytes) -> bytes | None:
+    """Ricodifica in PNG un flusso che il browser/Word non sa mostrare (TIFF,
+    JPEG 2000, EMF/WMF dove Pillow li legge). None se Pillow non ci riesce."""
+    try:
+        from PIL import Image
+
+        with Image.open(BytesIO(data)) as image:
+            image.load()
+            if image.mode not in ("RGB", "RGBA", "L", "LA", "P", "1"):
+                image = image.convert("RGBA" if "A" in image.mode else "RGB")
+            buffer = BytesIO()
+            image.save(buffer, format="PNG")
+        return buffer.getvalue()
+    except Exception:
+        return None
+
+
+def _web_image(image: ImageBlock) -> tuple[str, bytes] | None:
+    """(MIME, dati) sicuri per un data-URI, o None se l'immagine va scartata.
+
+    L'estensione arriva dal file (per il DOCX anche dal nome della parte ZIP):
+    usarla così com'era nel data-URI permetteva a un nome con `"` di uscire
+    dall'attributo `src` e iniettare HTML, e dava MIME sbagliati (image/svg,
+    image/jpg, image/tif) che il browser non mostra."""
+    ext = (image.ext or "").lower()
+    mime = _WEB_IMAGE_MIME.get(ext)
+    if mime:
+        return mime, image.data
+    png = _png_from(image.data)
+    return ("image/png", png) if png else None
+
+
+class WriteReport:
+    """Ciò che un writer non ha potuto rappresentare (per il verdetto a runtime)."""
+
+    def __init__(self) -> None:
+        self.dropped_images = 0
+
+
+def _marker_start(marker: str) -> int:
+    """Numero di partenza da un marcatore ("3." → 3, "(2)" → 2); 1 se non numerico."""
+    digits = "".join(char for char in marker if char.isdigit())
+    return int(digits) if digits and len(digits) <= 6 else 1
+
+
+def _list_entries(block: ListBlock, body_of) -> list[tuple[int, str, str]]:
+    """(rientro, marcatore, corpo) per ogni voce, con numerazione per livello.
+
+    La numerazione riparte a ogni livello più profondo e prosegue al rientro:
+    prima un contatore unico per tutto il blocco dava "1. a · 2. a.i · 3. b".
+    Il rientro di una sotto-voce è la colonna del contenuto del genitore, come
+    vuole CommonMark (2 spazi sotto "1. " non annidano)."""
+    entries: list[tuple[int, str, str]] = []
+    counters: dict[int, int] = {}
+    stack: list[tuple[int, int]] = []        # (livello, colonna del contenuto)
+    for item in block.items:
+        body = body_of(item)
+        if not body:
+            continue
+        level = max(1, item.level)
+        for deeper in [key for key in counters if key > level]:
+            del counters[deeper]
+        while stack and stack[-1][0] >= level:
+            stack.pop()
+        indent = stack[-1][1] if stack else 0
+        if item.is_ordered(block):
+            # La prima voce di un livello parte dal numero dell'originale ("3."
+            # in un PDF che continua un elenco), le successive incrementano.
+            counters[level] = counters[level] + 1 if level in counters else _marker_start(item.marker)
+            marker = f"{counters[level]}. "
+        else:
+            marker = "- "
+        stack.append((level, indent + len(marker)))
+        entries.append((indent, marker, body))
+    return entries
+
+
 # --- Markdown ---------------------------------------------------------------
 
-def _md_blocks(document: Document) -> list[str]:
+def _md_blocks(document: Document, report: WriteReport) -> list[str]:
     blocks: list[str] = []
     for paragraph in document.headers:
-        text = _md_runs(_paragraph_runs(paragraph)).strip()
+        text = _md_block_escape(_md_runs(_paragraph_runs(paragraph)).strip())
         if text:
             blocks.append(text)
     for block in document.blocks:
@@ -197,31 +310,27 @@ def _md_blocks(document: Document) -> list[str]:
             runs = _paragraph_runs(block)
             if not runs:
                 continue
-            if block.style == "title":
-                blocks.append(f"# {_md_runs(runs, heading=True).strip()}")
-            elif block.style == "heading":
-                blocks.append(f"{'#' * max(1, min(block.level, 6))} {_md_runs(runs, heading=True).strip()}")
+            if block.style in ("title", "heading"):
+                level = 1 if block.style == "title" else max(1, min(block.level, 6))
+                text = _md_heading_text(_md_runs(runs, heading=True).strip())
+                if text:
+                    blocks.append(f"{'#' * level} {text}")
             else:
-                text = _md_runs(runs).strip()
+                text = _md_block_escape(_md_runs(runs).strip())
                 if text:
                     blocks.append(text)
         elif isinstance(block, ListBlock):
-            lines = []
-            for number, item in enumerate(block.items, start=1):
-                indent = "  " * max(0, item.level - 1)
-                body = _md_runs(_paragraph_runs(item.paragraph)).strip()
-                if not body:
-                    continue
-                marker = f"{number}. " if block.ordered else "- "
-                lines.append(f"{indent}{marker}{body}")
-            if lines:
-                blocks.append("\n".join(lines))
+            entries = _list_entries(
+                block, lambda item: _md_block_escape(_md_runs(_paragraph_runs(item.paragraph)).strip()))
+            if entries:
+                blocks.append("\n".join(f"{' ' * indent}{marker}{body}"
+                                         for indent, marker, body in entries))
         elif isinstance(block, Table):
             rows = _table_text(block)
             if not rows or not _table_has_text(block):
                 continue
             width = max(len(row) for row in rows)
-            rows = [row + [""] * (width - len(row)) for row in rows]
+            rows = [[_md_escape(cell) for cell in row] + [""] * (width - len(row)) for row in rows]
             if block.header_rows:
                 head, body = rows[: block.header_rows], rows[block.header_rows:]
             else:
@@ -234,24 +343,31 @@ def _md_blocks(document: Document) -> list[str]:
             lines += ["| " + " | ".join(cell for cell in row) + " |" for row in body]
             blocks.append("\n".join(lines))
         elif isinstance(block, ImageBlock):
-            payload = base64.b64encode(block.data).decode("ascii")
-            blocks.append(f'<img alt="image" src="data:image/{block.ext};base64,{payload}">')
+            web = _web_image(block)
+            if web is None:
+                report.dropped_images += 1
+                continue
+            mime, data = web
+            payload = base64.b64encode(data).decode("ascii")
+            blocks.append(f'<img alt="image" src="data:{mime};base64,{payload}">')
         elif isinstance(block, PageBreak):
             continue
     for paragraph in document.footers:
-        text = _md_runs(_paragraph_runs(paragraph)).strip()
+        text = _md_block_escape(_md_runs(_paragraph_runs(paragraph)).strip())
         if text:
             blocks.append(text)
     return blocks
 
 
-def write_markdown(document: Document, path: Path) -> None:
-    path.write_text("\n\n".join(_md_blocks(document)) + "\n", encoding="utf-8")
+def write_markdown(document: Document, path: Path) -> WriteReport:
+    report = WriteReport()
+    path.write_text("\n\n".join(_md_blocks(document, report)) + "\n", encoding="utf-8")
+    return report
 
 
 # --- Testo semplice ---------------------------------------------------------
 
-def write_text(document: Document, path: Path) -> None:
+def write_text(document: Document, path: Path) -> WriteReport:
     chunks: list[str] = []
     for paragraph in document.headers:
         text = paragraph.text.strip()
@@ -263,13 +379,10 @@ def write_text(document: Document, path: Path) -> None:
             if text:
                 chunks.append(text)
         elif isinstance(block, ListBlock):
-            lines = []
-            for number, item in enumerate(block.items, start=1):
-                indent = "  " * max(0, item.level - 1)
-                marker = f"{number}. " if block.ordered else "- "
-                lines.append(f"{indent}{marker}{item.paragraph.text.strip()}")
-            if lines:
-                chunks.append("\n".join(lines))
+            entries = _list_entries(block, lambda item: item.paragraph.text.strip())
+            if entries:
+                chunks.append("\n".join(f"{' ' * indent}{marker}{body}"
+                                         for indent, marker, body in entries))
         elif isinstance(block, Table):
             rows = _table_text(block)
             if rows and _table_has_text(block):
@@ -281,6 +394,10 @@ def write_text(document: Document, path: Path) -> None:
         if text:
             chunks.append(text)
     path.write_text("\n\n".join(chunks) + "\n", encoding="utf-8")
+    report = WriteReport()
+    # Il testo semplice non ha immagini per definizione (lo dice il verdetto):
+    # non sono "scartate per formato", quindi non si contano.
+    return report
 
 
 # --- HTML -------------------------------------------------------------------
@@ -335,7 +452,36 @@ def _html_table(table: Table) -> str:
     return "".join(parts)
 
 
-def write_html(document: Document, path: Path) -> None:
+def _html_list(block: ListBlock) -> str:
+    """Elenchi annidati veri (<ol>/<ul> dentro <li>), anche misti.
+
+    Prima ogni voce era un <li> dello stesso elenco con un margine finto: il
+    livello si vedeva ma non esisteva, e una sotto-voce puntata in un elenco
+    numerato riceveva un numero."""
+    out: list[str] = []
+    stack: list[tuple[int, str]] = []      # (livello, tag) degli elenchi aperti
+    for item in block.items:
+        content = _html_runs(_paragraph_runs(item.paragraph))
+        level = max(1, item.level)
+        tag = "ol" if item.is_ordered(block) else "ul"
+        while stack and stack[-1][0] > level:
+            out.append(f"</li></{stack.pop()[1]}>")
+        if stack and stack[-1][0] == level:
+            if stack[-1][1] == tag:
+                out.append("</li>")
+            else:
+                out.append(f"</li></{stack.pop()[1]}>")
+        if not stack or stack[-1][0] < level:
+            out.append(f"<{tag}>")
+            stack.append((level, tag))
+        out.append(f"<li>{content}")
+    while stack:
+        out.append(f"</li></{stack.pop()[1]}>")
+    return "".join(out)
+
+
+def write_html(document: Document, path: Path) -> WriteReport:
+    report = WriteReport()
     parts = ['<!DOCTYPE html>', '<html><head><meta charset="utf-8">']
     if document.title:
         parts.append(f"<title>{_escape(document.title)}</title>")
@@ -362,19 +508,18 @@ def write_html(document: Document, path: Path) -> None:
                 attr = f' style="{style}"' if style else ""
                 parts.append(f"<p{attr}>{content}</p>")
         elif isinstance(block, ListBlock):
-            tag = "ol" if block.ordered else "ul"
-            parts.append(f"<{tag}>")
-            for item in block.items:
-                content = _html_runs(_paragraph_runs(item.paragraph))
-                indent = f' style="margin-left:{(item.level - 1) * 1.5:g}em"' if item.level > 1 else ""
-                parts.append(f"<li{indent}>{content}</li>")
-            parts.append(f"</{tag}>")
+            parts.append(_html_list(block))
         elif isinstance(block, Table):
             if _table_has_text(block):
                 parts.append(_html_table(block))
         elif isinstance(block, ImageBlock):
-            payload = base64.b64encode(block.data).decode("ascii")
-            parts.append(f'<p><img alt="image" src="data:image/{block.ext};base64,{payload}"></p>')
+            web = _web_image(block)
+            if web is None:
+                report.dropped_images += 1
+                continue
+            mime, data = web
+            payload = base64.b64encode(data).decode("ascii")
+            parts.append(f'<p><img alt="image" src="data:{mime};base64,{payload}"></p>')
     if document.footers:
         parts.append("<footer>")
         for paragraph in document.footers:
@@ -384,6 +529,7 @@ def write_html(document: Document, path: Path) -> None:
         parts.append("</footer>")
     parts.append("</body></html>")
     path.write_text("\n".join(parts) + "\n", encoding="utf-8")
+    return report
 
 
 # --- DOCX -------------------------------------------------------------------
@@ -459,15 +605,40 @@ def _set_paragraph_format(paragraph, source: Paragraph) -> None:
         paragraph.paragraph_format.space_after = Pt(source.space_after_pt)
 
 
+def _restarted_num_id(document, style_name: str, cache: dict[str, int],
+                      start: int = 1) -> int | None:
+    """numId nuovo che riparte da 1 per lo stile lista dato (uno per ListBlock).
+
+    Tutti i paragrafi "List Number" del template condividono UN numId: senza
+    un'istanza nuova il secondo elenco numerato proseguiva (3, 4…) invece di
+    ripartire da 1."""
+    if style_name in cache:
+        return cache[style_name]
+    try:
+        style = document.styles[style_name]
+        num_pr = style.element.pPr.numPr
+        numbering = document.part.numbering_part.element
+        abstract_id = numbering.num_having_numId(num_pr.numId.val).abstractNumId.val
+        ilvl = num_pr.ilvl.val if num_pr.ilvl is not None else 0
+        num = numbering.add_num(abstract_id)
+        num.add_lvlOverride(ilvl=ilvl).add_startOverride(max(1, start))
+        cache[style_name] = num.numId
+    except Exception:
+        return None    # template senza numerazione: resta quella dello stile
+    return cache[style_name]
+
+
 def _write_list(document, block: ListBlock) -> None:
     from docx.shared import Pt
 
+    restarted: dict[str, int] = {}
     for item in block.items:
         level = max(1, min(item.level, 3))
+        ordered = item.is_ordered(block)
         style: str | None = None
-        if block.ordered and item.marker.isdigit():
+        if ordered and item.marker.rstrip(".)").isdigit():
             style = "List Number" if level == 1 else f"List Number {level}"
-        elif not block.ordered:
+        elif not ordered:
             style = "List Bullet" if level == 1 else f"List Bullet {level}"
         paragraph = None
         if style:
@@ -479,6 +650,11 @@ def _write_list(document, block: ListBlock) -> None:
             paragraph = document.add_paragraph()
             paragraph.add_run(f"{item.marker} ")
             paragraph.paragraph_format.left_indent = Pt((level - 1) * 18)
+        elif ordered:
+            num_id = _restarted_num_id(document, style, restarted, _marker_start(item.marker))
+            if num_id is not None:
+                num_pr = paragraph._p.get_or_add_pPr().get_or_add_numPr()
+                num_pr.get_or_add_numId().val = num_id
         _add_runs(paragraph, _paragraph_runs(item.paragraph), item.paragraph)
         # Gli stili lista hanno un proprio rientro: la geometria del PDF lo
         # sovrascriverebbe in modo sbagliato, quindi qui vale il livello.
@@ -548,16 +724,23 @@ def _write_table(document, table: Table) -> None:
             _fill_cell(target, cell)
 
 
-def _write_image(document, image: ImageBlock) -> None:
+def _write_image(document, image: ImageBlock, report: WriteReport) -> None:
     from docx.shared import Pt
 
-    try:
-        if image.width_pt > 1:
-            document.add_picture(BytesIO(image.data), width=Pt(image.width_pt))
-        else:
-            document.add_picture(BytesIO(image.data))
-    except Exception:
-        pass   # flusso non supportato da Word (es. TIFF CCITT): non blocca il resto
+    width = Pt(image.width_pt) if image.width_pt > 1 else None
+    for data in (image.data, None):
+        if data is None:
+            # Formato che Word/python-docx non accetta (JPEG 2000, EMF, TIFF
+            # CCITT…): si ritenta in PNG prima di arrendersi.
+            data = _png_from(image.data)
+            if data is None:
+                break
+        try:
+            document.add_picture(BytesIO(data), width=width)
+            return
+        except Exception:
+            continue
+    report.dropped_images += 1   # dichiarato nel verdetto, non perso in silenzio
 
 
 def _write_furniture(docx, document: Document) -> None:
@@ -583,11 +766,12 @@ def _write_furniture(docx, document: Document) -> None:
 
 
 def write_docx(document: Document, path: Path, *, layout: str = "structure",
-               page_breaks: bool = True) -> None:
+               page_breaks: bool = True) -> WriteReport:
     from docx import Document as DocxDocument
     from docx.enum.section import WD_ORIENT
     from docx.shared import Pt
 
+    report = WriteReport()
     docx = DocxDocument()
     section = docx.sections[0]
     section.page_width = Pt(document.page_width_pt)
@@ -599,9 +783,9 @@ def write_docx(document: Document, path: Path, *, layout: str = "structure",
         # altrimenti Word somma il margine all'offset.
         section.left_margin = section.right_margin = Pt(0)
         section.top_margin = section.bottom_margin = Pt(0)
-        _write_visual_docx(docx, document)
+        _write_visual_docx(docx, document, report)
         docx.save(str(path))
-        return
+        return report
 
     section.left_margin = Pt(max(document.margin_left_pt, 28))
     section.right_margin = Pt(max(document.margin_right_pt, 28))
@@ -624,7 +808,7 @@ def write_docx(document: Document, path: Path, *, layout: str = "structure",
         elif isinstance(block, Table):
             _write_table(docx, block)
         elif isinstance(block, ImageBlock):
-            _write_image(docx, block)
+            _write_image(docx, block, report)
         elif isinstance(block, PageBreak) and page_breaks:
             docx.add_page_break()
     # Un corpo docx deve chiudersi con un paragrafo (Word rifiuta una tabella in
@@ -633,9 +817,10 @@ def write_docx(document: Document, path: Path, *, layout: str = "structure",
         docx.add_paragraph()
     _write_furniture(docx, document)
     docx.save(str(path))
+    return report
 
 
-def _write_visual_docx(docx, document: Document) -> None:
+def _write_visual_docx(docx, document: Document, report: WriteReport) -> None:
     """Layout visivo: una riga = un frame Word nella posizione esatta del PDF.
 
     Si perde la rifiusione (Word non ricalcola le righe) in cambio della
@@ -662,7 +847,7 @@ def _write_visual_docx(docx, document: Document) -> None:
                         for line in paragraph.lines:
                             _add_visual_line(docx, line, document.page_height_pt)
         elif isinstance(block, ImageBlock):
-            _add_visual_image(docx, block, document.page_height_pt)
+            _add_visual_image(docx, block, document.page_height_pt, report)
         elif isinstance(block, PageBreak):
             # I frame sono ancorati alla pagina: senza il salto, la pagina 2
             # finirebbe sopra la 1.
@@ -727,12 +912,19 @@ def _add_visual_line(docx, line, page_height: float) -> None:
     _frame(paragraph, line.x, line.y, line.width, max(line.height, line.size * 1.25), page_height)
 
 
-def _add_visual_image(docx, image: ImageBlock, page_height: float) -> None:
+def _add_visual_image(docx, image: ImageBlock, page_height: float, report: WriteReport) -> None:
     from docx.shared import Pt
 
     paragraph = docx.add_paragraph()
-    try:
-        paragraph.add_run().add_picture(BytesIO(image.data), width=Pt(image.width_pt or 100))
-    except Exception:
+    for data in (image.data, _png_from(image.data)):
+        if data is None:
+            continue
+        try:
+            paragraph.add_run().add_picture(BytesIO(data), width=Pt(image.width_pt or 100))
+            break
+        except Exception:
+            continue
+    else:
+        report.dropped_images += 1
         return
     _frame(paragraph, image.x, image.y, image.width_pt, image.height_pt, page_height)

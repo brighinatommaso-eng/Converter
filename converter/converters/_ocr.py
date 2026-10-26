@@ -12,6 +12,7 @@ mai un documento vuoto che sembra riuscito.
 
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 
 from ..core import deps
@@ -60,7 +61,32 @@ def _has_page_images(src: Path) -> bool:
     return any(walk(page) for page in extract_pages(str(src), maxpages=SCAN_CHECK_MAX_PAGES))
 
 
+_TEXT_CHECKS: dict[tuple[str, int, int], bool] = {}
+_TEXT_CHECKS_LOCK = threading.Lock()
+
+
 def has_extractable_text(src: Path) -> bool:
+    """Come `_check_extractable_text`, memorizzato per (percorso, mtime, dimensione).
+
+    validate() e convert() lo chiedono entrambi per lo stesso file: senza cache
+    le prime pagine venivano analizzate da pdfminer due volte per conversione."""
+    try:
+        stat = Path(src).stat()
+        key = (str(src), stat.st_mtime_ns, stat.st_size)
+    except OSError:
+        return _check_extractable_text(src)
+    with _TEXT_CHECKS_LOCK:
+        if key in _TEXT_CHECKS:
+            return _TEXT_CHECKS[key]
+    result = _check_extractable_text(src)
+    with _TEXT_CHECKS_LOCK:
+        if len(_TEXT_CHECKS) >= 128:
+            _TEXT_CHECKS.pop(next(iter(_TEXT_CHECKS)))
+        _TEXT_CHECKS[key] = result
+    return result
+
+
+def _check_extractable_text(src: Path) -> bool:
     """True se il PDF va letto come testo (non è una pura scansione).
 
     Basta guardare le prime pagine: un PDF testuale ha testo già lì, una

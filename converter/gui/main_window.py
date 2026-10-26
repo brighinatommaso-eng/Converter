@@ -49,6 +49,26 @@ from .queue_model import QueueItem, QueueModel
 from .theme import apply_titlebar, toggle_theme
 from .workers import ConvertRunnable, WorkerSignals
 
+# Destinazione di default per categoria, nell'ordine di ciò che si chiede più
+# spesso. Prima vinceva il primo target lossless in ordine ALFABETICO: ogni
+# JPG/PNG partiva verso BMP e ogni video verso AVI.
+_PREFERRED_TARGETS = {
+    "image": ("jpg", "png", "webp"),
+    "audio": ("mp3", "wav", "flac"),
+    "video": ("mp4", "mkv", "webm"),
+    "data": ("xlsx", "csv", "json"),
+    "document": ("docx", "pdf", "md", "html", "txt"),
+    "model3d": ("glb", "stl", "obj"),
+}
+
+
+def _preferred_target(category: str | None, usable: list):
+    by_format = {t.dst_format: t for t in usable}
+    for fmt in _PREFERRED_TARGETS.get(category or "", ()):
+        if fmt in by_format:
+            return by_format[fmt]
+    return None
+
 
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
@@ -126,7 +146,10 @@ class MainWindow(QMainWindow):
         self.same_chk.toggled.connect(self._on_same_toggled)
         out_row.addWidget(self.same_chk)
         self.out_edit = QLineEdit()
-        self.out_edit.setPlaceholderText("Output folder…")
+        self.out_edit.setPlaceholderText("Output folder… (type a path or Browse)")
+        # Un percorso digitato vale quanto uno scelto con Browse: prima era
+        # ignorato e i file finivano accanto alla sorgente senza avviso.
+        self.out_edit.editingFinished.connect(self._on_output_typed)
         self.out_edit.setEnabled(False)
         out_row.addWidget(self.out_edit, 1)
         self.browse_btn = QPushButton("Browse…")
@@ -179,6 +202,7 @@ class MainWindow(QMainWindow):
 
         self.options = OptionsPanel()
         self.options.changed.connect(self._on_options_changed)
+        self.options.estimate_ready.connect(self._on_estimate_ready)
         splitter.addWidget(self.options)
         splitter.setSizes([560, 380])
         root.addWidget(splitter, 1)
@@ -360,7 +384,8 @@ class MainWindow(QMainWindow):
                 # uguale alla sorgente (conversione a vuoto) e si preferisce lossless.
                 src = detected.format_id
                 usable = [t for t in targets if t.available and t.dst_format != src]
-                default = (next((t for t in usable if t.verdict.is_lossless), None)
+                default = (_preferred_target(detected.category, usable)
+                           or next((t for t in usable if t.verdict.is_lossless), None)
                            or (usable[0] if usable else None)
                            or next((t for t in targets if t.available), None))
                 if default:
@@ -402,6 +427,11 @@ class MainWindow(QMainWindow):
                 item.output_path = None
             self.model.row_changed(row)
         self._reset_progress_if_idle()
+
+    def _on_estimate_ready(self) -> None:
+        row = self.table.currentIndex().row()
+        if row >= 0:
+            self.model.row_changed(row)
 
     def _reset_progress_if_idle(self) -> None:
         """La barra di avanzamento globale torna a 0% quando si riconfigura un
@@ -573,6 +603,10 @@ class MainWindow(QMainWindow):
         self.out_edit.setEnabled(not checked)
         self.browse_btn.setEnabled(not checked)
 
+    def _on_output_typed(self) -> None:
+        text = self.out_edit.text().strip()
+        self.output_dir = Path(text).expanduser() if text else None
+
     def _browse_output(self) -> None:
         folder = QFileDialog.getExistingDirectory(self, "Choose output folder")
         if folder:
@@ -589,6 +623,14 @@ class MainWindow(QMainWindow):
         if not items:
             self.status.setText("Nothing to convert — tick at least one file.")
             return
+        if not self.same_as_source:
+            # Un percorso nel campo vale anche se Invio non è stato premuto.
+            typed = self.out_edit.text().strip()
+            if typed:
+                self.output_dir = Path(typed).expanduser()
+            if self.output_dir is None:
+                self.status.setText("Choose an output folder, or tick “Save next to source”.")
+                return
         # File convertibili lasciati senza spunta: esclusi in silenzio, ma contati.
         skipped = sum(1 for it in self.model.items
                       if it.convertible and not it.checked and it.status != "Converting")

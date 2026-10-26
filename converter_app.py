@@ -227,9 +227,9 @@ def _selftest(out_path: str | None) -> int:
             results["document txt->pdf"] = f"ERR {type(e).__name__}: {e}"
         # Filtro di export DOCX: esattamente quello che dava 'no export filter'.
         try:
-            results["document txt->docx"] = run_job(ConversionJob(txt, "txt", "docx", d / "a.docx")).ok
+            results["document txt->docx (pandoc/LibreOffice)"] = run_job(ConversionJob(txt, "txt", "docx", d / "a.docx")).ok
         except Exception as e:  # noqa: BLE001
-            results["document txt->docx"] = f"ERR {type(e).__name__}: {e}"
+            results["document txt->docx (pandoc/LibreOffice)"] = f"ERR {type(e).__name__}: {e}"
         # Input BINARIO (docx) + export filter (odt): import+export di un
         # documento Writer. (NB: pdf->docx NON è testato qui perché LibreOffice
         # non sa convertire un PDF in formati Writer — limite suo, non del bundle.)
@@ -257,7 +257,7 @@ def _selftest(out_path: str | None) -> int:
         except Exception as e:  # noqa: BLE001
             results["pdf struct writer-targets"] = f"ERR {type(e).__name__}: {e}"
     else:
-        for k in ("document txt->pdf", "document txt->docx", "document docx->odt",
+        for k in ("document txt->pdf", "document txt->docx (pandoc/LibreOffice)", "document docx->odt",
                   "document pdf->html", "pdf struct writer-targets"):
             results[k] = "SKIP no LibreOffice"
 

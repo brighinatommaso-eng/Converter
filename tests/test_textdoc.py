@@ -278,7 +278,9 @@ def test_pdf_to_docx_builds_real_word_structure(rich_pdf, tmp_path):
     # La formattazione dell'originale viaggia con la struttura.
     heading = next(p for p in docx.paragraphs if p.text == "1. Summary")
     assert heading.runs[0].font.size.pt == pytest.approx(14.0)
-    assert heading.runs[0].font.name == "Calibri"
+    # Il PDF della fixture è prodotto da LibreOffice: su Linux sostituisce
+    # Calibri con Carlito (metricamente identico) e lo incorpora così nel PDF.
+    assert heading.runs[0].font.name in ("Calibri", "Carlito")
 
 
 def test_pdf_to_docx_visual_layout_uses_absolute_frames(rich_pdf, tmp_path):
@@ -1171,3 +1173,152 @@ def test_pdf_conversion_stops_between_phases_on_cancel(tmp_path, monkeypatch):
     result = run_job(job, on_progress)
     assert result.ok is False and result.cancelled
     assert not out.exists()
+
+
+# --- Review 2026-10-26: Markdown, elenchi, testo DOCX nascosto, immagini -----
+
+def _md(document) -> str:
+    import tempfile
+
+    from converter.converters.docmodel import write_markdown
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "out.md"
+        write_markdown(document, path)
+        return path.read_text(encoding="utf-8")
+
+
+def test_markdown_escapes_text_that_would_become_syntax():
+    from converter.converters.docmodel.types import Table, TableCell
+
+    def para(text, **kw):
+        return Paragraph(lines=[Line(runs=[Run(text=text, **kw)])])
+
+    md = _md(Document(blocks=[
+        para("# not a heading, 5*3*2 and <b>x</b>"),
+        Table(rows=[[TableCell([para("a|b")]), TableCell([para("c")])],
+                    [TableCell([para("1")]), TableCell([para("2")])]], header_rows=1),
+    ]))
+    assert md.startswith("\\# not a heading, 5\\*3\\*2 and \\<b\\>x\\</b\\>")
+    assert "| a\\|b | c |" in md
+
+
+def test_markdown_bold_keeps_spaces_outside_the_delimiters():
+    md = _md(Document(blocks=[Paragraph(lines=[
+        Line(runs=[Run(text="bold at end ", bold=True)]), Line(runs=[Run(text="next")])])]))
+    assert "**bold at end** next" in md
+
+
+def test_mixed_lists_keep_their_numbering_and_nesting():
+    from converter.converters.docmodel.types import ListBlock, ListItem
+
+    def item(text, level, ordered):
+        return ListItem("1" if ordered else "•", level,
+                        Paragraph(lines=[Line(runs=[Run(text=text)])]), ordered=ordered)
+
+    block = ListBlock(ordered=True, items=[item("first", 1, True), item("sub", 2, False),
+                                           item("second", 1, True)])
+    assert _md(Document(blocks=[block])) == "1. first\n   - sub\n2. second\n"
+
+
+def test_docx_numbered_lists_restart_and_mixed_sub_bullets_stay_in_the_list(tmp_path):
+    import docx
+
+    from converter.converters.docmodel import read_docx, write_docx
+    from converter.converters.docmodel.types import ListBlock
+
+    src = docx.Document()
+    src.add_paragraph("first", style="List Number")
+    src.add_paragraph("sub", style="List Bullet 2")
+    src.add_paragraph("second", style="List Number")
+    src.add_paragraph("between")
+    src.add_paragraph("other one", style="List Number")
+    path = tmp_path / "lists.docx"
+    src.save(path)
+
+    document = read_docx(path)
+    lists = [block for block in document.blocks if isinstance(block, ListBlock)]
+    assert [len(block.items) for block in lists] == [3, 1]
+    assert "2. second" in _md(document)
+
+    out = tmp_path / "out.docx"
+    write_docx(document, out)
+    num_ids = {p._p.pPr.numPr.numId.val for p in docx.Document(out).paragraphs
+               if p.style.name == "List Number"}
+    assert len(num_ids) == 2          # due elenchi = due numerazioni che ripartono da 1
+
+
+def test_docx_text_in_revisions_fields_controls_nested_tables_and_text_boxes(tmp_path):
+    import docx
+    from docx.oxml import parse_xml
+
+    from converter.converters.docmodel import read_docx, write_text
+
+    w = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'
+    src = docx.Document()
+    paragraph = src.add_paragraph("tracked: ")
+    paragraph._p.append(parse_xml(
+        f'<w:ins {w} w:id="1" w:author="a"><w:r><w:t>INSERTED</w:t></w:r></w:ins>'))
+    paragraph._p.append(parse_xml(
+        f'<w:del {w} w:id="2" w:author="a"><w:r><w:delText>DELETED</w:delText></w:r></w:del>'))
+    paragraph._p.append(parse_xml(
+        f'<w:fldSimple {w} w:instr="PAGE"><w:r><w:t>FIELD</w:t></w:r></w:fldSimple>'))
+    src.element.body.insert(0, parse_xml(
+        f'<w:sdt {w}><w:sdtContent><w:p><w:r><w:t>CONTROL</w:t></w:r></w:p></w:sdtContent></w:sdt>'))
+    cell = src.add_table(rows=1, cols=1).cell(0, 0)
+    cell.text = "outer"
+    cell.add_table(rows=1, cols=2).cell(0, 1).text = "NESTED"
+    src.add_paragraph("end")
+    path = tmp_path / "hidden.docx"
+    src.save(path)
+
+    out = tmp_path / "hidden.txt"
+    write_text(read_docx(path), out)
+    text = out.read_text(encoding="utf-8")
+    for word in ("CONTROL", "INSERTED", "FIELD", "NESTED", "end"):
+        assert word in text, word
+    assert "DELETED" not in text
+
+
+def test_images_get_a_real_mime_and_unsafe_extensions_cannot_inject_html(tmp_path):
+    import io
+
+    from PIL import Image
+
+    from converter.converters.docmodel import write_html
+    from converter.converters.docmodel.types import ImageBlock
+
+    buffer = io.BytesIO()
+    Image.new("RGB", (4, 4), "red").save(buffer, "TIFF")
+    blocks = [ImageBlock(data=buffer.getvalue(), ext='x" onerror="alert(1)'),
+              ImageBlock(data=b"not an image", ext="emf")]
+    out = tmp_path / "x.html"
+    report = write_html(Document(blocks=blocks), out)
+    html = out.read_text(encoding="utf-8")
+    assert "onerror" not in html
+    assert 'src="data:image/png;base64,' in html    # TIFF ricodificato in PNG
+    assert report.dropped_images == 1               # l'EMF illeggibile è dichiarato
+
+
+def test_rule_segments_group_by_touch_without_comparing_every_pair():
+    from converter.converters.docmodel.pdfreader import _connected_components
+
+    grid = [("h", (0.0, 0.0, 100.0, 0.0)), ("v", (0.0, 0.0, 0.0, 100.0)),
+            ("h", (0.0, 100.0, 100.0, 100.0)), ("v", (100.0, 0.0, 100.0, 100.0))]
+    far = [("h", (400.0, 400.0, 460.0, 400.0))]
+    groups = sorted(sorted(group) for group in _connected_components(grid + far))
+    assert groups == [[0, 1, 2, 3], [4]]
+
+
+def test_scan_check_is_computed_once_per_file(tmp_path, monkeypatch):
+    import pdfminer.high_level as hl
+
+    pdf = tmp_path / "doc.pdf"
+    _write_text_pdf(pdf, "Hello Converter, this is real text.")
+    calls = []
+    original = hl.extract_text
+    monkeypatch.setattr(hl, "extract_text", lambda *a, **k: calls.append(1) or original(*a, **k))
+    _mock_ocr_chain(monkeypatch, present=False)
+    result = run_job(_job(pdf, "txt", tmp_path / "doc.txt"))   # validate + convert
+    assert result.ok, result.error
+    assert len(calls) == 1
