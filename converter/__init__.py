@@ -8,5 +8,5 @@ metadata del package).
 """
 
 APP_NAME = "Converter"
-__version__ = "0.1.1"
+__version__ = "0.1.2"
 APP_TAGLINE = "Convert files locally — honest about quality."

@@ -19,6 +19,29 @@ va nel file `report` (l'exe è windowed: senza console lo stdout si perde).
 import sys
 
 
+def _bundle_has_no_agpl_pdf_engine() -> bool:
+    """Tripwire: il bundle non deve contenere i motori PDF AGPL.
+
+    PyMuPDF/fitz, pdf2docx e img2pdf possono entrare come dipendenze opzionali
+    di un altro pacchetto (era il caso di img2pdf -> fitz). Nel sorgente sono
+    installati per altri usi, quindi il controllo vale solo da congelato.
+    """
+    if not getattr(sys, "frozen", False):
+        return True
+    import importlib.util
+    from pathlib import Path
+
+    names = ("fitz", "pymupdf", "pdf2docx", "img2pdf", "ocrmypdf", "pikepdf")
+    for name in names:
+        try:
+            if importlib.util.find_spec(name) is not None:
+                return False
+        except (ImportError, ValueError, AttributeError):
+            pass
+    base = Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent))
+    return not any((base / name).exists() for name in names)
+
+
 def _selftest(out_path: str | None) -> int:
     import shutil
     import subprocess
@@ -36,13 +59,17 @@ def _selftest(out_path: str | None) -> int:
     ff = find_ffmpeg()
     results: dict[str, object] = {}
 
+    # Licenze: il PDF passa solo da pdfminer.six (BSD). Un residuo AGPL nel
+    # bundle è un errore di distribuzione, non un dettaglio del singolo test.
+    results["bundle free of AGPL PDF engines"] = _bundle_has_no_agpl_pdf_engine()
+
     def gen_media(args, dst):
         # env pulito + niente finestra console: stessa disciplina dei tool esterni
         # nel frozen exe (altrimenti ffmpeg può caricare le NOSTRE dll dal bundle).
         subprocess.run([ff, "-hide_banner", "-loglevel", "error", "-y", *args, str(dst)],
                        check=True, env=clean_subprocess_env(), creationflags=_NW)
 
-    def make_min_pdf(path: Path, text: str = "Hello PDF") -> None:
+    def make_min_pdf(path: Path, text: str = "Hello PDF from the selftest") -> None:
         """PDF minimo ma valido (xref con offset corretti): da' a pdfminer del testo
         da estrarre senza dipendenze esterne."""
         objs = [
@@ -120,18 +147,26 @@ def _selftest(out_path: str | None) -> int:
 
     # pdf -> txt / md / docx / html (motore strutturale: pdfminer + python-docx)
     if has_pdfminer and has_docx:
+        def ok_or_error(result) -> bool | str:
+            return True if result.ok else f"FAIL {result.error}"
+
         try:
             pdf = d / "p.pdf"
-            make_min_pdf(pdf, "Hello PDF")
+            # > MIN_TEXT_CHARS (10) caratteri: altrimenti il gate OCR lo scambia
+            # per una scansione e il selftest senza OCR fallisce per finta.
+            make_min_pdf(pdf, "Hello PDF from the selftest")
             r = run_job(ConversionJob(pdf, "pdf", "txt", d / "p.txt"))
+            text = ((d / "p.txt").read_text(encoding="utf-8")
+                    if (d / "p.txt").exists() else "")
             results["portable pdf->txt"] = (
-                r.ok and "Hello" in (d / "p.txt").read_text(encoding="utf-8"))
-            results["portable pdf->md"] = run_job(
-                ConversionJob(pdf, "pdf", "md", d / "p.md")).ok
-            results["portable pdf->docx"] = run_job(
-                ConversionJob(pdf, "pdf", "docx", d / "p.docx")).ok
-            results["portable pdf->html"] = run_job(
-                ConversionJob(pdf, "pdf", "html", d / "p.html")).ok
+                True if r.ok and "Hello" in text
+                else f"FAIL {r.error} text={text[:80]!r}")
+            results["portable pdf->md"] = ok_or_error(run_job(
+                ConversionJob(pdf, "pdf", "md", d / "p.md")))
+            results["portable pdf->docx"] = ok_or_error(run_job(
+                ConversionJob(pdf, "pdf", "docx", d / "p.docx")))
+            results["portable pdf->html"] = ok_or_error(run_job(
+                ConversionJob(pdf, "pdf", "html", d / "p.html")))
         except Exception as e:  # noqa: BLE001
             results["portable pdf->txt"] = f"ERR {type(e).__name__}: {e}"
             for key in ("portable pdf->md", "portable pdf->docx", "portable pdf->html"):

@@ -26,9 +26,6 @@ differ slightly.
 | lxml | BSD-3-Clause | required by python-docx |
 | striprtf | BSD | rtf→txt |
 | trimesh | MIT | 3D mesh conversions |
-| ocrmypdf | MPL-2.0 | OCR orchestration (only if present at build time) |
-| pikepdf | MPL-2.0 | required by ocrmypdf |
-| img2pdf | LGPL-3.0 | required by ocrmypdf |
 
 ## Bundled command-line tools (separate executables)
 
@@ -86,6 +83,8 @@ they are **not** redistributed with Converter:
 
 - **LibreOffice** (MPL-2.0) — office document conversions
 - **Tesseract** (Apache-2.0) and **Ghostscript** (AGPL-3.0) — OCR for scanned PDFs
+- **OCRmyPDF** (MPL-2.0) with its `pikepdf`/`img2pdf` dependencies — launched as an
+  external executable for OCR, never imported into Converter
 
 Users install these themselves; each is governed by its own license.
 
@@ -94,4 +93,6 @@ Users install these themselves; each is governed by its own license.
 **pdf2docx** and its dependency **PyMuPDF (`fitz`)** — both AGPL-3.0 — are **not**
 used and **not** included in the Windows release. PDF → DOCX/ODT/RTF/MD/TXT/HTML
 is handled by the structured document engine built on **pdfminer.six (MIT)** and
-**python-docx (MIT)**, so no AGPL component is required.
+**python-docx (MIT)**, so no AGPL component is required. `converter.spec` excludes
+`fitz`/`pymupdf`/`pdf2docx`/`img2pdf`/`ocrmypdf`/`pikepdf` explicitly, and the
+frozen build's `--selftest` reports a failure if any of them is importable.

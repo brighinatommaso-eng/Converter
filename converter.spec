@@ -56,18 +56,17 @@ hiddenimports = [
     "docx",             # python-docx: lettore/scrittore del motore strutturale
     "striprtf",         # rtf->txt PORTABLE (puro Python, MIT)
     "striprtf.striprtf",
-    "ocrmypdf",         # OCR PDF scansionati (Full-only); cintura di sicurezza
-    "pikepdf",          # dipendenza ocrmypdf (bundling completo di Ghostscript/OCR
-    "img2pdf",          #   verificato al /package finale, fuori scope qui)
 ]
+# OCRmyPDF NON viene importato in-process: _ocr.py lo avvia come eseguibile
+# esterno, se installato sul sistema. Importarlo qui non renderebbe disponibile
+# l'eseguibile nel bundle e trascinerebbe anche img2pdf -> fitz/PyMuPDF (AGPL).
 # pdfminer importa sottomoduli dinamicamente: raccoglierli tutti evita esclusioni
 # silenziose di un submodule che PyInstaller non vede dall'analisi statica.
 hiddenimports += collect_submodules("pdfminer")
 # trimesh carica i suoi exchange loader (stl/gltf/ply/obj/threemf) in modo LAZY:
 # l'analisi statica non li vede, così l'exe importerebbe trimesh ma fallirebbe ogni
 # conversione 3D con ModuleNotFoundError. collect_submodules li include tutti.
-# lxml (per il 3mf) NON serve qui: arriva già da python-docx e da pikepdf,
-# entrambi in hiddenimports — non duplicarlo.
+# lxml (per il 3mf) arriva già da python-docx: non serve duplicarlo.
 hiddenimports += collect_submodules("trimesh")
 
 a = Analysis(
@@ -90,6 +89,10 @@ a = Analysis(
         "torch", "torchvision", "torchaudio", "transformers", "bitsandbytes",
         "accelerate", "safetensors", "datasets", "sklearn", "scipy", "pyarrow",
         "sympy", "numba", "tensorflow", "matplotlib", "IPython", "notebook",
+        # AGPL/estranei al motore: PDF solo con pdfminer.six. PyMuPDF (fitz),
+        # pdf2docx e img2pdf non devono finire nel bundle nemmeno come dipendenze
+        # opzionali di un altro pacchetto; OCRmyPDF/pikepdf restano esterni.
+        "fitz", "pymupdf", "pdf2docx", "img2pdf", "ocrmypdf", "pikepdf",
     ],
     noarchive=False,
     optimize=0,
