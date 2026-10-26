@@ -181,3 +181,37 @@ def test_signal_altering_options_are_never_lossless():
     assert conv.verdict("wav", "wav", {"sample_rate": "44100"}).is_lossy
     assert conv.verdict("wav", "wav", {"normalize": True}).is_lossy
     assert conv.verdict("wav", "flac", {}).is_lossless
+
+
+def test_cover_art_survives_and_normalize_keeps_the_sample_rate(tmp_path):
+    from PIL import Image
+
+    cover = tmp_path / "cover.png"
+    Image.new("RGB", (16, 16), "red").save(cover)
+    src = tmp_path / "song.mp3"
+    subprocess.run(
+        [find_ffmpeg(), "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi",
+         "-i", "sine=d=0.5", "-i", str(cover), "-map", "0:a", "-map", "1:v", "-c:v", "copy",
+         "-disposition:v", "attached_pic", str(src)],
+        check=True, creationflags=_NO_WINDOW,
+    )
+    for dst in ("mp3", "flac", "m4a"):
+        out = tmp_path / f"o.{dst}"
+        assert _convert(src, "mp3", dst, out).ok
+        assert any(s["codec_type"] == "video" and s["disposition"]["attached_pic"]
+                   for s in _all_streams(out)), dst
+    stripped = tmp_path / "s.flac"
+    from converter.core.pipeline import run_job
+    assert run_job(ConversionJob(src, "mp3", "flac", stripped, strip_metadata=True)).ok
+    assert not any(s["codec_type"] == "video" for s in _all_streams(stripped))
+    normalized = tmp_path / "n.wav"
+    assert _convert(src, "mp3", "wav", normalized, normalize=True).ok
+    assert _stream(normalized)["sample_rate"] == "44100"   # loudnorm uscirebbe a 192000
+
+
+def _all_streams(path):
+    out = subprocess.run(
+        [find_ffprobe(), "-v", "quiet", "-print_format", "json", "-show_streams", str(path)],
+        capture_output=True, text=True, creationflags=_NO_WINDOW,
+    )
+    return json.loads(out.stdout)["streams"]

@@ -9,7 +9,7 @@ batch non ferma gli altri.
 from __future__ import annotations
 
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from . import registry
 from .job import ConversionJob, ConversionResult, ProgressCallback, ProgressEvent, cancelled_result
@@ -75,7 +75,9 @@ def run_batch(
     results: list[ConversionResult] = [None] * len(jobs)  # type: ignore[list-item]
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         futures = {pool.submit(run_job, job): idx for idx, job in enumerate(jobs)}
-        for future in futures:
+        # as_completed: on_result arriva quando un job FINISCE, non in ordine di
+        # invio (prima un job lento in testa tratteneva tutti i risultati pronti).
+        for future in as_completed(futures):
             idx = futures[future]
             results[idx] = future.result()
             if on_result:

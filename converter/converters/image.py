@@ -7,7 +7,7 @@ lossy; salvare in JPEG/HEIC/AVIF/GIF/ICO introduce perdita (LOSSY) e va spiegato
 
 from __future__ import annotations
 
-from PIL import Image, ImageOps
+from PIL import Image, ImageOps, ImageSequence
 
 from ..core.base import Converter
 from ..core.deps import has_module
@@ -46,6 +46,81 @@ _PIL_FORMAT = {
     "png": "PNG", "jpg": "JPEG", "webp": "WEBP", "bmp": "BMP", "tiff": "TIFF",
     "gif": "GIF", "ico": "ICO", "heic": "HEIF", "avif": "AVIF",
 }
+
+# Target che reggono più frame/pagine (animazioni, TIFF multipagina).
+_MULTI_FRAME_DST = ("gif", "webp", "tiff")
+
+# Modi colore che ogni formato sa scrivere SENZA conversioni.
+_NATIVE_MODES = {
+    "png": {"1", "L", "LA", "P", "RGB", "RGBA", "I;16", "I;16B", "I"},
+    "jpg": {"L", "RGB", "CMYK"},
+    # BMP: niente RGBA. Pillow scrive 32 bit ma rilegge senza alpha, e molti
+    # programmi fanno lo stesso: la trasparenza va dichiarata persa.
+    "bmp": {"1", "L", "RGB"},
+    "tiff": {"1", "L", "LA", "P", "RGB", "RGBA", "CMYK", "I;16", "I", "F", "YCbCr"},
+    "webp": {"RGB", "RGBA"},
+    "gif": {"P", "L", "RGB", "RGBA"},      # Pillow quantizza tenendo la trasparenza
+    "ico": {"RGBA", "RGB", "P", "L", "1"},
+    "heic": {"RGB", "RGBA"},
+    "avif": {"RGB", "RGBA"},
+}
+_HIGH_DEPTH = {"I;16", "I;16B", "I;16L", "I", "F"}
+
+
+def _to_8bit(image: Image.Image) -> Image.Image:
+    """16 bit/float → 8 bit SCALANDO: convert("L") da I;16 satura tutto oltre 255."""
+    if image.mode == "F":
+        return image.point(lambda value: value * 255).convert("L")
+    as_int = image.convert("I") if image.mode != "I" else image
+    peak = as_int.getextrema()[1] or 1
+    scale = 1 / 256 if peak > 255 else 1
+    return as_int.point(lambda value: value * scale).convert("L")
+
+
+def _prepare_mode(image: Image.Image, dst: str) -> tuple[Image.Image, str | None]:
+    """Porta l'immagine a un modo che `dst` sa scrivere; ritorna (immagine, perdita).
+
+    Prima un JPEG CMYK verso PNG o un PNG a 16 bit verso BMP/JPG fallivano con un
+    OSError grezzo ("cannot write mode CMYK as PNG"); ora si converte e il
+    verdetto dice cosa si è perso."""
+    native = _NATIVE_MODES.get(dst, {"RGB", "RGBA"})
+    mode = image.mode
+    has_alpha = mode in ("RGBA", "LA", "PA", "La", "RGBa") or (
+        mode == "P" and "transparency" in image.info)
+    if mode == "P" and has_alpha and dst == "ico":
+        # ICO in palette perde la trasparenza: in RGBA la conserva.
+        return image.convert("RGBA"), None
+    if dst == "bmp" and has_alpha:
+        return (image.convert("RGBA").convert("RGB"),
+                "Transparency is dropped (BMP has no reliable alpha channel).")
+    if dst == "bmp" and mode == "P":
+        return image.convert("RGB"), None      # stessi pixel, niente palette da perdere
+    if mode in native:
+        return image, None
+    if dst == "jpg":
+        if has_alpha:
+            return ImageConverter._flatten_alpha(image), "Transparency is flattened onto white (JPEG has no alpha)."
+        if mode in _HIGH_DEPTH:
+            return _to_8bit(image), "16-bit depth is reduced to 8-bit (JPEG is 8-bit)."
+        return image.convert("RGB"), None
+    if mode in _HIGH_DEPTH:
+        return _to_8bit(image), f"16-bit depth is reduced to 8-bit ({dst.upper()} is 8-bit)."
+    if mode == "CMYK":
+        return image.convert("RGB"), f"CMYK colours are converted to RGB ({dst.upper()} has no CMYK)."
+    return image.convert("RGBA" if has_alpha else "RGB"), None
+
+
+def _fit_square(image: Image.Image, size: int) -> Image.Image:
+    """Immagine dentro un quadrato size×size, proporzioni intatte, bordi trasparenti."""
+    rgba = image.convert("RGBA")
+    ratio = size / max(rgba.size)
+    if ratio != 1:
+        rgba = rgba.resize((max(1, round(rgba.width * ratio)), max(1, round(rgba.height * ratio))),
+                           Image.LANCZOS)
+    canvas = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    canvas.paste(rgba, ((size - rgba.width) // 2, (size - rgba.height) // 2))
+    return canvas
+
 
 _LOSSLESS_DST = {"png", "bmp", "tiff", "webp"}  # webp salvato in modalità lossless di default
 _READABLE = frozenset({"png", "jpg", "webp", "heic", "bmp", "tiff", "gif", "avif", "ico"})
@@ -129,75 +204,92 @@ class ImageConverter(Converter):
 
     def convert(self, job: ConversionJob, progress: ProgressCallback) -> ConversionResult:
         progress(ProgressEvent(0.1, "Reading image…"))
+        dst = job.dst_format
+        notes: list[str] = []          # perdite scoperte a runtime (modo colore, frame)
         with Image.open(job.src_path) as img:
             img.load()
             n_frames = getattr(img, "n_frames", 1)
             is_animated = getattr(img, "is_animated", False) or n_frames > 1
-            # Orientamento EXIF: applicalo ai PIXEL così una foto verticale non
-            # esce coricata verso png/bmp (che non portano l'EXIF). Solo per le
-            # sorgenti a frame singolo: exif_transpose collasserebbe un'animazione.
-            # exif_transpose rimuove anche il tag Orientation, quindi la copia
-            # dell'EXIF più sotto non lo riapplica una seconda volta.
-            if not is_animated:
-                img = ImageOps.exif_transpose(img)
-            save_kwargs: dict = {}
-            out_format = _PIL_FORMAT[job.dst_format]
-            image = img
+            keeps_frames = is_animated and dst in _MULTI_FRAME_DST
 
+            save_kwargs: dict = {}
             # Metadati: per default si preservano EXIF e profilo ICC.
             if not job.strip_metadata:
                 exif = img.info.get("exif")
-                if exif and job.dst_format in ("jpg", "webp", "tiff", "heic", "avif"):
+                if exif and dst in ("jpg", "webp", "tiff", "heic", "avif", "png"):
                     save_kwargs["exif"] = exif
                 icc = img.info.get("icc_profile")
                 if icc:
                     save_kwargs["icc_profile"] = icc
 
+            if keeps_frames:
+                # Ogni frame va preparato per il formato di destinazione: prima la
+                # conversione colore toccava solo il primo frame e save_all salvava
+                # quindi UN frame (WebP/TIFF animati → GIF statica, in silenzio).
+                frames, durations = [], []
+                for frame in ImageSequence.Iterator(img):
+                    prepared, note = _prepare_mode(frame.copy(), dst)
+                    if note and note not in notes:
+                        notes.append(note)
+                    frames.append(prepared)
+                    durations.append(frame.info.get("duration", img.info.get("duration", 100)))
+                image = frames[0]
+                save_kwargs.update(save_all=True, append_images=frames[1:])
+                if dst in ("gif", "webp"):
+                    save_kwargs.update(duration=durations, loop=img.info.get("loop", 0))
+                    if dst == "gif":
+                        save_kwargs["disposal"] = 2
+            else:
+                # Orientamento EXIF applicato ai PIXEL (png/bmp non portano l'EXIF);
+                # exif_transpose rimuove anche il tag, così non si riapplica due volte.
+                image = img if is_animated else ImageOps.exif_transpose(img)
+                if "exif" in save_kwargs:
+                    # L'EXIF dell'immagine RADDRIZZATA (senza Orientation).
+                    save_kwargs["exif"] = image.info.get("exif", save_kwargs["exif"])
+                image, note = _prepare_mode(image, dst)
+                if note:
+                    notes.append(note)
+
             opts = job.options
             progress(ProgressEvent(0.5, "Encoding…"))
-
-            if job.dst_format == "jpg":
-                # JPEG non ha canale alpha: appiattisci su bianco. (commento IT)
-                if image.mode in ("RGBA", "LA", "P"):
-                    image = self._flatten_alpha(image)
+            if dst == "jpg":
                 save_kwargs.update(quality=int(opts.get("quality", 95)), optimize=True,
                                    progressive=True, subsampling=0)
-            elif job.dst_format == "webp":
+            elif dst == "webp":
                 if opts.get("lossless", True):
                     save_kwargs.update(lossless=True, quality=100, method=6)
                 else:
                     save_kwargs.update(lossless=False, quality=int(opts.get("quality", 90)), method=6)
-            elif job.dst_format == "png":
+            elif dst == "png":
                 save_kwargs.update(compress_level=int(opts.get("compress_level", 6)), optimize=True)
-            elif job.dst_format == "tiff":
+            elif dst == "tiff":
                 comp = opts.get("compression", "tiff_lzw")
                 if comp != "none":
                     save_kwargs["compression"] = comp
-            elif job.dst_format in ("heic", "avif"):
+            elif dst in ("heic", "avif"):
                 save_kwargs["quality"] = int(opts.get("quality", 90))
-            elif job.dst_format == "gif":
-                if image.mode not in ("P", "L"):
-                    image = image.convert("RGBA").convert("P", palette=Image.ADAPTIVE)
-            elif job.dst_format == "ico":
+            elif dst == "ico":
                 size = int(opts.get("size", 256))
+                # Pillow rifiuta le dimensioni più grandi dell'immagine ("All sizes
+                # too large"): un'icona da 256 di un PNG 32×32 falliva sempre. Si
+                # porta l'immagine al quadrato richiesto (proporzioni intatte,
+                # bordi trasparenti), come fa un editor di icone.
+                image = _fit_square(image, size)
                 save_kwargs["sizes"] = [(size, size)]
 
-            # Sorgente multi-frame verso un container che regge l'animazione/le
-            # pagine (gif/webp/tiff): preservali tutti invece di tenere solo il
-            # primo frame in silenzio.
-            if is_animated and job.dst_format in ("gif", "webp", "tiff"):
-                save_kwargs["save_all"] = True
-
-            image.save(job.output_path, format=out_format, **save_kwargs)
+            image.save(job.output_path, format=_PIL_FORMAT[dst], **save_kwargs)
 
         size = job.output_path.stat().st_size
-        verdict = self.verdict(job.src_format, job.dst_format, job.options)
+        verdict = self.verdict(job.src_format, dst, job.options)
         # Onestà: se la sorgente è multi-frame ma il target tiene un solo frame,
         # è andato perso tutto tranne il primo — NON è lossless, qualunque cosa
         # dica il verdetto per-formato.
-        if is_animated and job.dst_format not in ("gif", "webp", "tiff"):
-            verdict = lossy(f"Source has multiple frames/pages; only the first is kept "
-                            f"in {job.dst_format.upper()} (single-frame format).")
+        if is_animated and not keeps_frames:
+            notes.insert(0, f"Source has {n_frames} frames/pages; only the first is kept in "
+                            f"{dst.upper()} (single-frame format).")
+        if notes:
+            reason = " ".join(notes)
+            verdict = lossy(reason if verdict.is_lossless else f"{verdict.reason} {reason}")
         return ConversionResult(ok=True, output_path=job.output_path, output_size=size,
                                 verdict=verdict)
 

@@ -200,6 +200,13 @@ class ListItem:
     marker: str
     level: int
     paragraph: Paragraph
+    # None = eredita ListBlock.ordered. Serve agli elenchi misti (voci numerate
+    # con sotto-punti puntati): spezzarli in blocchi separati faceva ripartire la
+    # numerazione ("1. primo · - sotto · 1. secondo" invece di "2. secondo").
+    ordered: bool | None = None
+
+    def is_ordered(self, block: ListBlock) -> bool:
+        return block.ordered if self.ordered is None else self.ordered
 
 
 @dataclass(slots=True)
