@@ -120,7 +120,7 @@ jobs:
           $report = Join-Path $env:RUNNER_TEMP "selftest-bundle.txt"
           $p = Start-Process dist\Converter\Converter.exe -ArgumentList "--selftest", "`"$report`"" -Wait -PassThru
           Get-Content $report
-          if ($p.ExitCode -ne 0 -or -not (Select-String $report -SimpleMatch "SELFTEST PASS" -Quiet)) {
+          if ($p.ExitCode -ne 0 -or -not (Select-String -Path $report -Pattern "SELFTEST PASS" -SimpleMatch -Quiet)) {
             throw "selftest dell'exe fallito"
           }
 
@@ -148,7 +148,7 @@ jobs:
           $report = Join-Path $env:RUNNER_TEMP "selftest-installed.txt"
           $p = Start-Process "$dir\Converter.exe" -ArgumentList "--selftest", "`"$report`"" -Wait -PassThru
           Get-Content $report
-          if ($p.ExitCode -ne 0 -or -not (Select-String $report -SimpleMatch "SELFTEST PASS" -Quiet)) {
+          if ($p.ExitCode -ne 0 -or -not (Select-String -Path $report -Pattern "SELFTEST PASS" -SimpleMatch -Quiet)) {
             throw "selftest della copia installata fallito"
           }
 
