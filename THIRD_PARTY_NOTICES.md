@@ -33,7 +33,9 @@ If they were present on the build machine, these binaries are copied into the
 bundle's `_internal/bin` and invoked as **separate subprocesses**. They are
 **independent executables distributed alongside Converter, not linked into its
 code** (mere aggregation); Converter only launches them. Their license texts are
-shipped in the `licenses/` folder of the release archive.
+shipped in the `licenses/` folder of the release archive, next to `Converter.exe`
+(the build copies the repository's `licenses/` folder there and refuses to bundle
+a GPL tool whose license text is missing).
 
 ### ffmpeg / ffprobe
 
@@ -72,9 +74,9 @@ Under the LGPL you may:
 - **replace or relink** the bundled Qt/PySide6 libraries with a modified version
   of your own — simply swap the corresponding files in the `_internal` folder.
 
-The full LGPL-3.0 text is available from the PySide6/Qt distribution
-(<https://www.gnu.org/licenses/lgpl-3.0.html>) and from the project's own
-`licenses/` metadata when installed via `pip`.
+The full LGPL-3.0 text is shipped as `licenses/Qt-PySide6-LGPLv3.txt` (it builds on
+the GPL-3.0, shipped as `licenses/ffmpeg-GPLv3.txt`), and is also available at
+<https://www.gnu.org/licenses/lgpl-3.0.html>.
 
 ## External tools detected at runtime (NOT bundled)
 

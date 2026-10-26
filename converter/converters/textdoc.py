@@ -29,13 +29,13 @@ from ..core import deps, engine
 from ..core.base import Converter
 from ..core.deps import DependencyStatus, libreoffice_install_hint
 from ..core.formats import primary_ext
-from ..core.job import ConversionJob, ConversionResult, ProgressCallback, ProgressEvent
+from ..core.job import ConversionJob, ConversionResult, ProgressCallback, ProgressEvent, cancelled_result
 from ..core.options import BoolOption, ChoiceOption, Option
 from ..core.quality import QualityVerdict, lossy, unsupported
 from ..core.registry import register
 from . import _ocr
 from ._libreoffice import DEFAULT_TIMEOUT, run_convert
-from .docmodel import read_docx, read_pdf, write_docx, write_html, write_markdown, write_text
+from .docmodel import PageBreak, read_docx, read_pdf, write_docx, write_html, write_markdown, write_text
 
 # Target di questo converter. `pdf` come target resta a LibreOffice (export fedele
 # dal documento strutturato), non si rigenera dall'IR.
@@ -185,6 +185,8 @@ class TextDocConverter(Converter):
                     needs_ocr = not _ocr.has_extractable_text(job.src_path)
                 except Exception as exc:
                     return ConversionResult(ok=False, error=f"Could not read this PDF: {exc}")
+                if job.cancel.cancelled:
+                    return cancelled_result()
                 if needs_ocr:
                     if not _ocr.available():
                         return ConversionResult(ok=False, error=_ocr.SCANNED_MESSAGE)
@@ -194,11 +196,17 @@ class TextDocConverter(Converter):
                     if not ok:
                         return ConversionResult(ok=False, error=error)
                     source = ocr_pdf
+                    if job.cancel.cancelled:
+                        return cancelled_result()
                 progress(ProgressEvent(0.4, "Reconstructing the document…"))
                 try:
                     document = read_pdf(source)
                 except ValueError as exc:
                     return ConversionResult(ok=False, error=str(exc))
+                if not any(not isinstance(block, PageBreak) for block in document.blocks):
+                    # Mai un documento vuoto che sembra riuscito.
+                    return ConversionResult(
+                        ok=False, error="This PDF contains no text or images to convert.")
             else:
                 progress(ProgressEvent(0.3, "Reading document…"))
                 try:
@@ -206,6 +214,10 @@ class TextDocConverter(Converter):
                 except ValueError as exc:
                     return ConversionResult(ok=False, error=str(exc))
 
+            # Annullamento cooperativo tra le fasi: la lettura pdfminer non si può
+            # interrompere a metà, ma il lavoro successivo non parte.
+            if job.cancel.cancelled:
+                return cancelled_result()
             progress(ProgressEvent(0.75, "Writing " + job.dst_format.upper() + "…"))
             try:
                 self._write(document, job, tmp, layout, page_breaks, progress)

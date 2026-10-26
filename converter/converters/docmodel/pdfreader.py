@@ -583,6 +583,32 @@ def _page_gutters(lines: list[Line]) -> list[tuple[float, float]]:
     return gutters
 
 
+_MIN_COLUMN_LINES = 3
+
+
+def _column_gutters(lines: list[Line]) -> list[tuple[float, float]]:
+    """Gutter di pagina che separano colonne di testo VERE.
+
+    Una gutter conta solo se ha almeno qualche riga da entrambi i lati: una
+    data allineata a destra o un numero isolato non fanno una colonna, e il
+    loro rientro deve restare misurato dal margine."""
+    kept = []
+    for left, right in _page_gutters(lines):
+        before = sum(1 for line in lines if line.right <= left + 0.5)
+        after = sum(1 for line in lines if line.x >= right - 0.5)
+        if before >= _MIN_COLUMN_LINES and after >= _MIN_COLUMN_LINES:
+            kept.append((left, right))
+    return kept
+
+
+def _column_bounds(block, gutters: list[tuple[float, float]], text_left: float,
+                   text_right: float) -> tuple[float, float]:
+    """(sinistra, destra) della colonna che contiene il blocco."""
+    left = max([text_left] + [end for _, end in gutters if end <= block.x + 0.5])
+    right = min([text_right] + [start for start, _ in gutters if start >= block.right - 0.5])
+    return left, right
+
+
 def _has_text_beside(lines: list[Line], left: float, right: float) -> bool:
     """True se la pagina ha testo a sinistra o a destra della tabella.
 
@@ -1135,9 +1161,15 @@ def _assemble(pages: list[dict], page_width: float, page_height: float) -> Docum
                 if index not in table_lines and not _inside_tables(line, aligned)]
         paragraphs = _paragraphs_from_lines(_xy_cut(free))
 
+        gutters = _column_gutters(free)
         for paragraph in paragraphs:
-            paragraph.align = _detect_align(paragraph, text_left, text_right)
-            paragraph.indent_pt = max(0.0, paragraph.x - text_left)
+            # Rientro e allineamento si misurano dentro la COLONNA del paragrafo:
+            # misurati dal margine della pagina, ogni paragrafo della colonna
+            # destra riceveva ~250pt di rientro e in Word finiva schiacciato in
+            # una striscia stretta.
+            left, right = _column_bounds(paragraph, gutters, text_left, text_right)
+            paragraph.align = _detect_align(paragraph, left, right)
+            paragraph.indent_pt = max(0.0, paragraph.x - left)
         # Anche i blocchi (non solo le righe) vanno ordinati per colonne: un
         # sort per sola y mescolerebbe le due colonne di un PDF.
         page_blocks = _xy_cut([*paragraphs, *tables, *page["images"]])
@@ -1146,7 +1178,7 @@ def _assemble(pages: list[dict], page_width: float, page_height: float) -> Docum
         document.blocks.extend(page_blocks)
 
     _classify_headings(document)
-    document.blocks = _group_lists(document.blocks, text_left)
+    document.blocks = _group_lists(document.blocks)
     document.margin_left_pt = text_left
     document.margin_right_pt = max(0.0, page_width - text_right)
     return document
@@ -1209,7 +1241,7 @@ def _remove_prefix(paragraph: Paragraph, marker: str) -> None:
         first.runs[0].text = first.runs[0].text.lstrip()
 
 
-def _group_lists(blocks: list, text_left: float) -> list:
+def _group_lists(blocks: list) -> list:
     """Trasforma i paragrafi che iniziano con proiettile/numero in ListBlock."""
     result: list = []
     current: ListBlock | None = None
@@ -1225,7 +1257,9 @@ def _group_lists(blocks: list, text_left: float) -> list:
         if current is None or current.ordered != ordered:
             current = ListBlock(ordered=ordered)
             result.append(current)
-        level = 1 + max(0, int(round((block.x - text_left - 8) / 18.0)))
+        # Il livello viene dal rientro DENTRO la colonna (indent_pt), non dal
+        # margine della pagina: nella colonna destra ogni voce finiva al livello 5.
+        level = 1 + max(0, int(round((block.indent_pt - 8) / 18.0)))
         _remove_prefix(block, marker)
         current.items.append(ListItem(marker=marker, level=min(level, 5), paragraph=block))
     return result

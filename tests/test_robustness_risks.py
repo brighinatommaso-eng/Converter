@@ -131,3 +131,35 @@ def test_dumpenv_survives_no_stdout(monkeypatch, tmp_path):
     out = tmp_path / "env.txt"
     rc = converter_app._dumpenv(str(out))
     assert rc == 0 and out.exists()  # niente AttributeError su stdout None
+
+
+# --- Annulla: i job in coda non partono (review 2026-10-26) -------------------
+
+def test_cancelled_job_never_starts(tmp_path):
+    from PIL import Image
+
+    from converter.core.job import ConversionJob
+    from converter.core.pipeline import run_job
+
+    src = tmp_path / "a.png"
+    Image.new("RGB", (8, 8)).save(src)
+    out = tmp_path / "a.jpg"
+    job = ConversionJob(src, "png", "jpg", out)
+    job.cancel.cancel()          # Annulla premuto mentre il job era in coda
+    result = run_job(job)
+    assert result.ok is False and result.cancelled and result.error == "Cancelled."
+    assert not out.exists()
+
+
+# --- Licenze GPL nel bundle (review 2026-10-26) --------------------------------
+
+def test_gpl_license_texts_ship_with_the_build():
+    root = Path(__file__).resolve().parent.parent
+    for name, first_line in (("ffmpeg-GPLv3.txt", "GNU GENERAL PUBLIC LICENSE"),
+                             ("ffmpeg-LGPLv2.1.txt", "GNU LESSER GENERAL PUBLIC LICENSE"),
+                             ("pandoc-GPLv2.txt", "GNU GENERAL PUBLIC LICENSE"),
+                             ("Qt-PySide6-LGPLv3.txt", "GNU LESSER GENERAL PUBLIC LICENSE")):
+        text = (root / "licenses" / name).read_text(encoding="utf-8")
+        assert first_line in text[:200], name
+    spec = (root / "converter.spec").read_text(encoding="utf-8")
+    assert 'shutil.copytree("licenses"' in spec and "THIRD_PARTY_NOTICES.md" in spec

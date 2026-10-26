@@ -138,3 +138,35 @@ def test_detect_glb_ply_stl_gltf(tmp_path):
     # glTF è JSON: va distinto dai dati json.
     d = detect(_box(tmp_path / "b.gltf"))
     assert d.format_id == "gltf" and d.category == "model3d"
+
+
+# --- File collaterali: mai nomi fissi condivisi (review 2026-10-26) -----------
+
+def test_gltf_is_a_single_self_contained_file(tmp_path):
+    """trimesh scriveva gltf_buffer_0.bin a nome fisso: in batch si sovrascrivevano."""
+    src = _box(tmp_path / "box.stl")
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    for name in ("a.gltf", "b.gltf"):
+        assert run_job(ConversionJob(src, "stl", "gltf", out_dir / name)).ok
+    assert sorted(p.name for p in out_dir.iterdir()) == ["a.gltf", "b.gltf"]
+    assert len(trimesh.load(out_dir / "a.gltf").geometry) >= 1
+
+
+def test_obj_side_files_are_named_after_each_output(tmp_path):
+    import numpy as np
+    from PIL import Image
+
+    box = trimesh.creation.box()
+    uv = np.random.default_rng(0).random((len(box.vertices), 2))
+    textured = trimesh.Trimesh(box.vertices, box.faces, visual=trimesh.visual.TextureVisuals(
+        uv=uv, image=Image.new("RGB", (8, 8), "red")))
+    src = tmp_path / "t.glb"
+    textured.export(src)
+    for name in ("t.obj", "t (1).obj"):
+        result = run_job(ConversionJob(src, "glb", "obj", tmp_path / name))
+        assert result.ok, result.error
+    names = {p.name for p in tmp_path.iterdir()}
+    assert {"t.mtl", "t_material_0.png", "t_(1).mtl", "t_(1)_material_0.png"} <= names
+    assert "material.mtl" not in names
+    assert trimesh.load(tmp_path / "t (1).obj").visual.kind == "texture"

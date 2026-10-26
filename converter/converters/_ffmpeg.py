@@ -69,6 +69,41 @@ def probe_duration(path: Path) -> float | None:
         return None
 
 
+def probe_audio(path: Path) -> dict | None:
+    """Formato del primo stream audio: {'codec', 'sample_fmt', 'bits'} o None.
+
+    Serve al verdetto onesto dei target lossless: un WAV a 24 bit o in virgola
+    mobile non va scritto a 16 bit sotto un badge LOSSLESS. `bits` è la
+    profondità reale (bits_per_raw_sample, poi bits_per_sample), 0 se ignota.
+    """
+    ffprobe = find_ffprobe()
+    if not ffprobe:
+        return None
+    try:
+        out = subprocess.run(
+            [ffprobe, "-v", "quiet", "-print_format", "json", "-show_streams",
+             "-select_streams", "a:0", str(path)],
+            capture_output=True, text=True, creationflags=_NO_WINDOW,
+            env=clean_subprocess_env(), timeout=_PROBE_TIMEOUT,
+        )
+        streams = json.loads(out.stdout or "{}").get("streams") or []
+    except (subprocess.SubprocessError, ValueError, json.JSONDecodeError):
+        return None
+    if not streams:
+        return None
+    stream = streams[0]
+    bits = 0
+    for key in ("bits_per_raw_sample", "bits_per_sample"):
+        try:
+            bits = int(stream.get(key) or 0)
+        except (TypeError, ValueError):
+            bits = 0
+        if bits:
+            break
+    return {"codec": str(stream.get("codec_name") or ""),
+            "sample_fmt": str(stream.get("sample_fmt") or ""), "bits": bits}
+
+
 def run_ffmpeg(
     args: list[str],
     output_path: Path,

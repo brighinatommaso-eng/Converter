@@ -21,17 +21,32 @@ from dataclasses import dataclass, field
 BULLETS = "•●▪▫◦‣∙·\uf0b7\uf0a7\uf0d8\uf0fc-–—*"
 
 
+# Proiettili "ASCII" ambigui: sono anche segno meno, trattino, asterisco di nota.
+_DASH_BULLETS = "-–*"
+
+
 def is_bullet(text: str) -> bool:
-    """True se `text` inizia con un proiettile (e non è una riga di soli trattini)."""
+    """True se `text` inizia con un proiettile seguito da testo.
+
+    I glifi dedicati (•, ▪, ◦…) bastano da soli. Trattino, lineetta e asterisco
+    invece sono anche testo normale, quindi valgono come proiettile solo se
+    seguiti da uno spazio: "-5 °C" (segno meno), "---" (riga) e "*Nota" restano
+    testo. "- 5 kg" con lo spazio resta un elenco. La lineetta lunga "—" non è
+    mai un proiettile: a inizio riga apre un inciso o un dialogo, e trattarla da
+    voce di elenco spezzava i paragrafi a metà frase.
+    """
     stripped = text.lstrip()
     if not stripped:
         return False
-    if stripped[0] not in BULLETS:
+    first = stripped[0]
+    if first in _DASH_BULLETS:
+        if len(stripped) < 2 or not stripped[1].isspace():
+            return False
+        rest = stripped[1:].strip()
+        return bool(rest) and not all(char in "-–—*_ " for char in rest)
+    if first not in BULLETS or first == "—":
         return False
-    rest = stripped[1:].lstrip()
-    # Un trattino è un proiettile solo se seguito da spazio e da testo: così
-    # "---" o "-5 °C" non diventano voci di elenco.
-    return bool(rest)
+    return bool(stripped[1:].strip())
 
 
 @dataclass(slots=True)

@@ -13,7 +13,9 @@ singolo.
 
 from __future__ import annotations
 
+import re
 import shutil
+from pathlib import Path
 
 from ..core.base import Converter
 from ..core.deps import DependencyStatus, has_module
@@ -31,6 +33,17 @@ _INPUT = frozenset({"obj", "stl", "ply", "glb", "gltf", "3mf"})
 _OUTPUT = frozenset({"obj", "stl", "ply", "glb", "gltf"})
 _SCENE_DST = ("glb", "gltf")       # formati che reggono il grafo di scena
 _SINGLE_MESH_DST = ("stl", "obj", "ply")  # formati a mesh singola (appiattiscono)
+
+
+def _free_name(folder: Path, stem: str, suffix: str) -> Path:
+    """Primo nome libero `stem<suffix>`, `stem_1<suffix>`, … — senza spazi, a
+    differenza di naming.resolve_collision (" (1)"), perché finisce in un .mtl."""
+    candidate = folder / f"{stem}{suffix}"
+    index = 1
+    while candidate.exists():
+        candidate = folder / f"{stem}_{index}{suffix}"
+        index += 1
+    return candidate
 
 
 @register
@@ -110,6 +123,7 @@ class Mesh3DConverter(Converter):
 
         import trimesh
 
+        side_files: list[Path] = []   # locale: l'istanza è condivisa tra i thread
         progress(ProgressEvent(0.1, "Reading model…"))
         # Un solo load: trimesh.load ritorna Trimesh o Scene a seconda del contenuto.
         loaded = trimesh.load(str(job.src_path))
@@ -141,10 +155,19 @@ class Mesh3DConverter(Converter):
         elif job.dst_format == "ply":
             # PLY: l'ASCII/binario si sceglie col kwarg encoding (verificato 4.12.2).
             export_obj.export(str(job.output_path), file_type="ply", encoding=encoding)
-        else:  # obj, glb, gltf
+        elif job.dst_format == "gltf":
+            # Buffer (e texture) incorporati come data-URI: UN solo file. Prima
+            # trimesh scriveva accanto "gltf_buffer_0.bin" a nome FISSO, così due
+            # modelli convertiti nella stessa cartella si sovrascrivevano i buffer
+            # e il primo .gltf restava corrotto in silenzio.
+            export_obj.export(str(job.output_path), file_type="gltf", embed_buffers=True)
+        elif job.dst_format == "obj":
+            side_files = self._export_obj(export_obj, job)
+        else:  # glb: binario autocontenuto
             export_obj.export(str(job.output_path), file_type=job.dst_format)
 
-        size = job.output_path.stat().st_size
+        size = job.output_path.stat().st_size + sum(
+            side.stat().st_size for side in side_files if side.exists())
         verdict = self.verdict(job.src_format, job.dst_format, job.options)
         # Onestà: scena multi-oggetto verso un formato a mesh singola = grafo perso,
         # a prescindere dal verdetto per-coppia (come il multi-frame di image.py).
@@ -153,3 +176,41 @@ class Mesh3DConverter(Converter):
                             f"mesh in {job.dst_format.upper()} (scene graph is lost).")
         return ConversionResult(ok=True, output_path=job.output_path, output_size=size,
                                 verdict=verdict)
+
+    @staticmethod
+    def _export_obj(mesh, job: ConversionJob) -> list[Path]:
+        """OBJ + .mtl + texture con nomi derivati dall'output, mai sovrascritti.
+
+        trimesh scrive "material.mtl" e "material_0.png" a nome FISSO: in un batch
+        nella stessa cartella l'ultimo modello sovrascriveva i materiali dei
+        precedenti. Qui ogni file collaterale prende il nome dell'output
+        ("sedia.mtl", "sedia_material_0.png") e, se esiste già, un suffisso."""
+        from trimesh.exchange.obj import export_obj
+
+        folder = job.output_path.parent
+        # Niente spazi: molti lettori OBJ/MTL spezzano `mtllib`/`map_Kd` sugli spazi.
+        stem = re.sub(r"\s+", "_", job.output_path.stem)
+        written: list[Path] = []
+        mtl_path = _free_name(folder, stem, ".mtl")
+        try:
+            text, files = export_obj(mesh, return_texture=True, mtl_name=mtl_path.name)
+        except TypeError:
+            # Oggetti senza materiali (es. nuvole di punti): solo il testo OBJ.
+            text, files = export_obj(mesh), {}
+        renames: dict[str, Path] = {}
+        for name in files:
+            if name != mtl_path.name:
+                base, dot, ext = name.rpartition(".")
+                renames[name] = _free_name(folder, f"{stem}_{base or ext}",
+                                           f".{ext}" if dot else "")
+        for name, data in files.items():
+            if name == mtl_path.name:
+                for old, new in renames.items():
+                    data = data.replace(old.encode(), new.name.encode())
+                target = mtl_path
+            else:
+                target = renames[name]
+            target.write_bytes(data)
+            written.append(target)
+        job.output_path.write_text(text, encoding="utf-8")
+        return written
