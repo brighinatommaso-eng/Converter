@@ -672,11 +672,17 @@ class MainWindow(QMainWindow):
                 item.progress = 1.0
                 item.out_size = result.output_size
                 item.verdict = result.verdict or item.verdict
+            elif result.cancelled:
+                # Annullato dall'utente: non è un fallimento e non va in cronologia.
+                item.status = "Cancelled"
+                item.progress = 0.0
+                item.error = None
             else:
                 item.status = "Failed"
                 item.error = result.error
             self.model.row_changed(row)
-            self._record_history(item, result)
+            if not result.cancelled:
+                self._record_history(item, result)
         self._fractions[row] = 1.0
 
         self._completed += 1
@@ -697,13 +703,19 @@ class MainWindow(QMainWindow):
         self.overall.setValue(100)
         done = sum(1 for it in self.model.items if it.status == "Done")
         failed = sum(1 for it in self.model.items if it.status == "Failed")
+        cancelled = sum(1 for it in self.model.items if it.status == "Cancelled")
         msg = f"Finished: {done} done"
         if failed:
             msg += f", {failed} failed (see the Status column)"
+        if cancelled:
+            msg += f", {cancelled} cancelled"
         self.status.setText(msg + ".")
 
     def _cancel_all(self) -> None:
+        # I job ancora in coda nel pool non partiranno (run_job controlla il token);
+        # quelli già in corso: ffmpeg viene ucciso, i motori in-process finiscono
+        # il passo corrente (PDF: si ferma tra le fasi).
         for it in self.model.items:
             if it.status == "Converting":
                 it.cancel.cancel()
-        self.status.setText("Cancelling…")
+        self.status.setText("Cancelling… (files already being converted may still finish)")

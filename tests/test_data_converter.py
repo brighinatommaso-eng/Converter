@@ -227,3 +227,91 @@ def test_same_format_xlsx_strips_metadata_only_on_request(tmp_path):
     assert props.creator != "SECRET-AUTHOR"
     assert props.title != "SECRET-DOC-TITLE"
     assert [c.value for c in load_workbook(strip).active[2]] == ["Alice", 30]  # dati intatti
+
+
+# --- Badge LOSSLESS falsi (review 2026-10-26) --------------------------------
+
+def _job(src, s, d, out, **opts):
+    return ConversionJob(src_path=src, src_format=s, dst_format=d, output_path=out, options=opts)
+
+
+def test_yaml_to_yaml_is_a_byte_copy(tmp_path):
+    """Il re-dump perdeva i commenti e cambiava `NO` in `false` sotto LOSSLESS."""
+    src = tmp_path / "d.yaml"
+    src.write_text("# commento importante\ncountry: NO\nreleased: 2024-01-01\n", encoding="utf-8")
+    out = tmp_path / "o.yaml"
+    result = run_job(_job(src, "yaml", "yaml", out))
+    assert result.ok and result.verdict.is_lossless
+    assert out.read_bytes() == src.read_bytes()
+
+
+def test_yaml_to_json_handles_dates_and_is_honestly_lossy(tmp_path):
+    src = tmp_path / "d.yaml"
+    src.write_text("# c\nreleased: 2024-01-01\n", encoding="utf-8")
+    out = tmp_path / "d.json"
+    result = run_job(_job(src, "yaml", "json", out))
+    assert result.ok, result.error
+    assert result.verdict.is_lossy and "comments" in result.verdict.reason
+    assert json.loads(out.read_text(encoding="utf-8")) == {"released": "2024-01-01"}
+
+
+def test_semicolon_csv_keeps_its_columns(tmp_path):
+    """I CSV europei usano ';': letti con ',' diventavano UNA colonna (LOSSLESS)."""
+    src = tmp_path / "prezzi.csv"
+    src.write_text("nome;prezzo\nmela;1,50\npera;2,00\n", encoding="utf-8")
+    out = tmp_path / "prezzi.xlsx"
+    assert run_job(_job(src, "csv", "xlsx", out)).ok
+    df = pd.read_excel(out, dtype=str)
+    assert list(df.columns) == ["nome", "prezzo"]
+    assert df["prezzo"].tolist() == ["1,50", "2,00"]
+    # csv→csv conserva il separatore della sorgente.
+    same = tmp_path / "copia.csv"
+    assert run_job(_job(src, "csv", "csv", same)).ok
+    assert same.read_text(encoding="utf-8").splitlines()[0] == "nome;prezzo"
+
+
+def test_cp1252_csv_is_read_instead_of_crashing(tmp_path):
+    src = tmp_path / "excel.csv"
+    src.write_bytes("città,prezzo\nForlì,3\n".encode("cp1252"))
+    out = tmp_path / "excel.json"
+    result = run_job(_job(src, "csv", "json", out))
+    assert result.ok, result.error
+    assert json.loads(out.read_text(encoding="utf-8")) == [{"città": "Forlì", "prezzo": "3"}]
+
+
+def test_duplicate_headers_survive_tabular_targets(tmp_path):
+    """pandas rinominava "a,a" in "a,a.1" sotto un badge LOSSLESS."""
+    src = tmp_path / "dup.csv"
+    src.write_text("a,a,b\n1,2,3\n", encoding="utf-8")
+    out = tmp_path / "dup.tsv"
+    result = run_job(_job(src, "csv", "tsv", out))
+    assert result.ok and result.verdict.is_lossless
+    assert out.read_text(encoding="utf-8").splitlines() == ["a\ta\tb", "1\t2\t3"]
+
+
+def test_duplicate_headers_to_json_are_renamed_and_declared(tmp_path):
+    src = tmp_path / "dup.csv"
+    src.write_text("a,a,b\n1,2,3\n", encoding="utf-8")
+    out = tmp_path / "dup.json"
+    result = run_job(_job(src, "csv", "json", out))
+    assert result.ok, result.error
+    assert result.verdict.is_lossy and "'a' → 'a_2'" in result.verdict.reason
+    assert json.loads(out.read_text(encoding="utf-8")) == [{"a": "1", "a_2": "2", "b": "3"}]
+
+
+def test_xlsx_to_json_still_writes_numbers(tmp_path):
+    src = tmp_path / "n.xlsx"
+    pd.DataFrame({"n": [1, 2], "x": [1.5, None]}).to_excel(src, index=False)
+    out = tmp_path / "n.json"
+    result = run_job(_job(src, "xlsx", "json", out))
+    assert result.ok, result.error
+    assert json.loads(out.read_text(encoding="utf-8")) == [{"n": 1, "x": 1.5}, {"n": 2, "x": None}]
+
+
+def test_duplicate_headers_to_xml_stay_valid_tag_names(tmp_path):
+    src = tmp_path / "dup.csv"
+    src.write_text("a,a\n1,2\n", encoding="utf-8")
+    out = tmp_path / "dup.xml"
+    result = run_job(_job(src, "csv", "xml", out))
+    assert result.ok, result.error
+    assert "<a_2>2</a_2>" in out.read_text(encoding="utf-8")

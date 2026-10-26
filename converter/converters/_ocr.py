@@ -24,8 +24,8 @@ LANGS = "eng+ita+fra"
 # deve gelare la coda (stessa disciplina di LibreOffice).
 TIMEOUT = 600.0
 
-# Sotto questa soglia di caratteri non-whitespace nelle prime pagine il PDF è
-# considerato una scansione: pagine-immagine, nessun testo da ricostruire.
+# Sotto questa soglia di caratteri non-whitespace nelle prime pagine, SE le pagine
+# contengono immagini, il PDF è considerato una scansione (pagine-immagine).
 MIN_TEXT_CHARS = 10
 SCAN_CHECK_MAX_PAGES = 5
 
@@ -43,17 +43,41 @@ def available() -> bool:
             and deps.find_tesseract() is not None)
 
 
+def _has_page_images(src: Path) -> bool:
+    """True se le prime pagine contengono immagini (il segno di una scansione)."""
+    from pdfminer.high_level import extract_pages
+    from pdfminer.layout import LTImage
+
+    def walk(node) -> bool:
+        if isinstance(node, LTImage):
+            return True
+        try:
+            children = list(node)
+        except TypeError:
+            return False
+        return any(walk(child) for child in children)
+
+    return any(walk(page) for page in extract_pages(str(src), maxpages=SCAN_CHECK_MAX_PAGES))
+
+
 def has_extractable_text(src: Path) -> bool:
-    """True se il PDF contiene testo estraibile (non è una pura scansione).
+    """True se il PDF va letto come testo (non è una pura scansione).
 
     Basta guardare le prime pagine: un PDF testuale ha testo già lì, una
     scansione non ne ha in nessuna, ed estrarre centinaia di pagine due volte
     (validate + convert) sarebbe inutile lentezza.
+
+    Poco testo NON basta a dire "scansione": una pagina con la sola parola
+    "Invoice" è un PDF testuale vero (prima veniva rifiutato chiedendo l'OCR).
+    È una scansione solo se, oltre al testo quasi assente, le pagine contengono
+    immagini; senza immagini il testo che c'è è tutto il contenuto.
     """
     from pdfminer.high_level import extract_text
 
     text = extract_text(str(src), maxpages=SCAN_CHECK_MAX_PAGES)
-    return len("".join(text.split())) >= MIN_TEXT_CHARS
+    if len("".join(text.split())) >= MIN_TEXT_CHARS:
+        return True
+    return not _has_page_images(src)
 
 
 def apply(src: Path, dst: Path) -> tuple[bool, str]:

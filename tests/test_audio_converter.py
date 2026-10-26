@@ -119,3 +119,65 @@ def test_preserve_metadata_keeps_id3_tags(tmp_path):
     tags = _format_tags(out)
     assert tags.get("title") == "SECRET-TITLE"
     assert tags.get("artist") == "SECRET-ARTIST"
+
+
+# --- Profondità in bit: niente troncamenti sotto LOSSLESS (review 2026-10-26) ---
+
+def _make_pcm(path, codec):
+    subprocess.run(
+        [find_ffmpeg(), "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi",
+         "-i", "sine=frequency=440:duration=0.3", "-c:a", codec, str(path)],
+        check=True, creationflags=_NO_WINDOW,
+    )
+
+
+def _stream(path):
+    out = subprocess.run(
+        [find_ffprobe(), "-v", "quiet", "-print_format", "json", "-show_streams", str(path)],
+        capture_output=True, text=True, creationflags=_NO_WINDOW,
+    )
+    return json.loads(out.stdout)["streams"][0]
+
+
+def _convert(src, s, d, out, **opts):
+    from converter.core.pipeline import run_job
+    return run_job(ConversionJob(src, s, d, out, options=opts))
+
+
+def test_24bit_wav_stays_24bit(tmp_path):
+    src = tmp_path / "s24.wav"
+    _make_pcm(src, "pcm_s24le")
+    for dst in ("wav", "flac"):
+        out = tmp_path / f"o.{dst}"
+        result = _convert(src, "wav", dst, out)
+        assert result.ok and result.verdict.is_lossless, result.error
+        assert str(_stream(out).get("bits_per_raw_sample")) == "24"
+
+
+def test_float_wav_to_wav_stays_float_and_to_flac_is_lossy(tmp_path):
+    src = tmp_path / "f32.wav"
+    _make_pcm(src, "pcm_f32le")
+    wav = tmp_path / "o.wav"
+    assert _convert(src, "wav", "wav", wav).verdict.is_lossless
+    assert _stream(wav)["codec_name"] == "pcm_f32le"
+    flac = _convert(src, "wav", "flac", tmp_path / "o.flac")
+    assert flac.ok and flac.verdict.is_lossy and "integer" in flac.verdict.reason
+
+
+def test_explicit_bit_depth_reduction_is_declared(tmp_path):
+    src = tmp_path / "s24.wav"
+    _make_pcm(src, "pcm_s24le")
+    result = _convert(src, "wav", "wav", tmp_path / "o.wav", bit_depth="16")
+    assert result.ok and result.verdict.is_lossy and "16-bit" in result.verdict.reason
+    # 16-bit verso 24-bit non riduce nulla: il verdetto a runtime torna lossless.
+    src16 = tmp_path / "s16.wav"
+    _make_pcm(src16, "pcm_s16le")
+    assert _convert(src16, "wav", "flac", tmp_path / "o.flac", bit_depth="24").verdict.is_lossless
+
+
+def test_signal_altering_options_are_never_lossless():
+    conv = resolve("wav", "flac")
+    assert conv.verdict("wav", "flac", {"channels": "1"}).is_lossy
+    assert conv.verdict("wav", "wav", {"sample_rate": "44100"}).is_lossy
+    assert conv.verdict("wav", "wav", {"normalize": True}).is_lossy
+    assert conv.verdict("wav", "flac", {}).is_lossless

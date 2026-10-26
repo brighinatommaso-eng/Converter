@@ -127,3 +127,21 @@ coll = COLLECT(
     upx_exclude=[],
     name="Converter",
 )
+
+# --- Testi di licenza accanto all'eseguibile ---------------------------------
+# ffmpeg (GPL-3) e pandoc (GPL-2) vengono ridistribuiti nel bundle: il testo della
+# loro licenza DEVE viaggiare con il binario. Prima THIRD_PARTY_NOTICES.md citava
+# una cartella `licenses/` che nessuno copiava. Qui finiscono nella radice della
+# release (dist/Converter/), accanto a Converter.exe, insieme a LICENSE e notices.
+_dist_root = os.path.join(DISTPATH, "Converter")
+_required_licenses = {"ffmpeg": "ffmpeg-GPLv3.txt", "ffprobe": "ffmpeg-GPLv3.txt",
+                      "pandoc": "pandoc-GPLv2.txt"}
+for _src, _ in binaries:
+    _tool = os.path.splitext(os.path.basename(_src))[0].lower()
+    _needed = _required_licenses.get(_tool)
+    if _needed and not os.path.isfile(os.path.join("licenses", _needed)):
+        raise SystemExit(f"[converter.spec] {_tool} è nel bundle ma manca licenses/{_needed}: "
+                         "non si distribuisce un binario GPL senza il testo della licenza.")
+shutil.copytree("licenses", os.path.join(_dist_root, "licenses"), dirs_exist_ok=True)
+for _doc in ("LICENSE", "THIRD_PARTY_NOTICES.md"):
+    shutil.copy2(_doc, os.path.join(_dist_root, _doc))

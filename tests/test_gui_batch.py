@@ -158,3 +158,22 @@ def test_changing_target_rearms_a_completed_row(tmp_path):
     assert item.status == "Ready"
     assert item.out_size is None and item.output_path is None
     assert win.model.items_to_convert() == [item]
+
+
+def test_cancelled_job_shows_cancelled_not_failed(tmp_path, monkeypatch):
+    """Un job fermato dall'Annulla non è un fallimento e non va in cronologia."""
+    png = tmp_path / "a.png"
+    Image.new("RGB", (8, 8)).save(png)
+    win = MainWindow()
+    recorded = []
+    monkeypatch.setattr(win, "_record_history", lambda item, result: recorded.append(result))
+    win._add_paths([png])
+    win._total, win._completed, win._fractions = 1, 0, {0: 0.0}
+    win.model.items[0].status = "Converting"
+
+    win._on_finished(0, ConversionResult(ok=False, error="Cancelled.", cancelled=True))
+
+    assert win.model.items[0].status == "Cancelled"
+    assert win.model.items[0].convertible            # si può riconvertire
+    assert recorded == []
+    assert "1 cancelled" in win.status.text()

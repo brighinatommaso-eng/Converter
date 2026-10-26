@@ -38,7 +38,7 @@ class QueueItem:
     verdict: QualityVerdict | None = None
     options: dict[str, Any] = field(default_factory=dict)
     strip_metadata: bool = False
-    status: str = "Ready"          # Ready / Converting / Done / Failed / Unsupported
+    status: str = "Ready"          # Ready / Converting / Done / Failed / Cancelled / Unsupported
     checked: bool = True           # spunta nella colonna File: include il file nel batch
     progress: float = 0.0          # 0..1
     est_size: int | None = None

@@ -1093,3 +1093,81 @@ def test_empty_table_is_not_written_as_broken_markdown(tmp_path):
     write_docx(document, out)
     assert out.exists()
 
+
+
+# --- Review 2026-10-26: PDF corti, proiettili, due colonne, annullamento -----
+
+def test_short_text_pdf_is_not_mistaken_for_a_scan(tmp_path, monkeypatch):
+    """Una pagina con la sola parola "Invoice" veniva rifiutata come scansione."""
+    _mock_ocr_chain(monkeypatch, present=False)
+    pdf = tmp_path / "short.pdf"
+    _write_text_pdf(pdf, "Invoice")
+    assert _ocr.has_extractable_text(pdf) is True
+    out = tmp_path / "short.txt"
+    result = run_job(_job(pdf, "txt", out))
+    assert result.ok, result.error
+    assert "Invoice" in out.read_text(encoding="utf-8")
+
+
+def test_image_only_pdf_is_still_a_scan(tmp_path):
+    from PIL import Image
+
+    pdf = tmp_path / "scan.pdf"
+    Image.new("RGB", (200, 200), "white").save(pdf, "PDF")
+    assert _ocr.has_extractable_text(pdf) is False
+
+
+def test_dash_bullets_need_a_space_and_never_eat_a_minus_sign():
+    from converter.converters.docmodel.types import is_bullet
+
+    for text in ("-5 °C", "---", "*emphasis*", "— an aside", "- - -", "-- a"):
+        assert not is_bullet(text), text
+    for text in ("- item", "* item", "– item", "• item", "•item", " item"):
+        assert is_bullet(text), text
+
+
+def test_line_starting_with_a_negative_number_stays_in_its_paragraph(tmp_path):
+    from converter.converters.docmodel import read_pdf
+    from converter.converters.docmodel.types import ListBlock
+
+    pdf = tmp_path / "minus.pdf"
+    _write_placed_text_pdf(pdf, [
+        (72.0, 700.0, "The temperature dropped overnight to a low of"),
+        (72.0, 686.0, "-5 degrees, which is unusual for this region and"),
+        (72.0, 672.0, "surprised the forecasters entirely."),
+    ])
+    document = read_pdf(pdf)
+    assert not [block for block in document.blocks if isinstance(block, ListBlock)]
+    assert "a low of -5 degrees" in " ".join(
+        block.text for block in document.blocks if isinstance(block, Paragraph))
+
+
+def test_right_column_paragraphs_are_not_indented_by_the_left_column(tmp_path):
+    """L'indent si misurava dal margine pagina: ~250pt su ogni paragrafo a destra."""
+    from converter.converters.docmodel import read_pdf
+
+    items = []
+    for index in range(12):
+        items.append((72.0, 700.0 - 14 * index, "left column sentence with several words"))
+        items.append((320.0, 700.0 - 14 * index, "right column sentence with words too"))
+    pdf = tmp_path / "twocol.pdf"
+    _write_placed_text_pdf(pdf, items)
+    paragraphs = [block for block in read_pdf(pdf).blocks if isinstance(block, Paragraph)]
+    right = [p for p in paragraphs if p.x > 300]
+    assert right and all(p.indent_pt < 2 for p in right)
+
+
+def test_pdf_conversion_stops_between_phases_on_cancel(tmp_path, monkeypatch):
+    _mock_ocr_chain(monkeypatch, present=False)
+    pdf = tmp_path / "doc.pdf"
+    _write_text_pdf(pdf, "Hello Converter, this is real text.")
+    out = tmp_path / "doc.docx"
+    job = _job(pdf, "docx", out)
+
+    def on_progress(event):
+        if "Reconstructing" in event.message:
+            job.cancel.cancel()
+
+    result = run_job(job, on_progress)
+    assert result.ok is False and result.cancelled
+    assert not out.exists()
