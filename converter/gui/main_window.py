@@ -25,7 +25,6 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMainWindow,
     QMessageBox,
-    QProgressBar,
     QPushButton,
     QSplitter,
     QStyle,
@@ -45,6 +44,7 @@ from ..core.registry import resolve, targets_for
 from .badge_delegate import BadgeDelegate
 from .dialogs import AboutDialog, DependencyDialog, EngineModeDialog, HistoryDialog, confirm_lossy
 from .options_panel import OptionsPanel
+from .progress_bar import TwoToneProgressBar
 from .queue_model import QueueItem, QueueModel
 from .theme import apply_titlebar, toggle_theme
 from .workers import ConvertRunnable, WorkerSignals
@@ -209,7 +209,7 @@ class MainWindow(QMainWindow):
 
         # Barra inferiore: progresso + azioni di conversione.
         bottom = QHBoxLayout()
-        self.overall = QProgressBar()
+        self.overall = TwoToneProgressBar()
         self.overall.setRange(0, 100)
         self.overall.setValue(0)
         bottom.addWidget(self.overall, 1)

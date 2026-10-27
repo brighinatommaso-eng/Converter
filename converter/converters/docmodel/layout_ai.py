@@ -249,6 +249,30 @@ class PdfPages:
                 order=rank))
         return regions
 
+    def looks_blank(self, index: int, x0: float, y0: float, x1: float, y1: float) -> bool:
+        """True se nella pagina renderizzata quel rettangolo è (quasi) vuoto.
+
+        Serve per le immagini che il PDF contiene ma non mostra (ritagliate via da
+        un tracciato di clip, coperte, fuori pagina): pdfminer le estrae comunque e
+        nel Word ricomparivano dal nulla."""
+        with _PDFIUM_LOCK:
+            page = self.document[index]
+            try:
+                left, bottom, right, top = self._page_box(page)
+                x0, x1 = max(left, x0), min(right, x1)
+                y0, y1 = max(bottom, y0), min(top, y1)
+                if x1 - x0 < 2 or y1 - y0 < 2:
+                    return True
+                scale = min(1.0, 200.0 / max(x1 - x0, y1 - y0))
+                image = page.render(scale=scale, crop=(x0 - left, y0 - bottom,
+                                                       right - x1, top - y1)).to_pil()
+            finally:
+                page.close()
+        from PIL import ImageStat
+
+        stat = ImageStat.Stat(image.convert("L"))
+        return stat.stddev[0] < 2.0 and stat.mean[0] > 245
+
     def crop_png(self, index: int, x0: float, y0: float, x1: float, y1: float) -> bytes | None:
         """Ritaglio PNG della pagina (coordinate PDF) a `_CROP_DPI`."""
         with _PDFIUM_LOCK:

@@ -95,6 +95,11 @@ def current_theme() -> str:
     return val if val in _PALETTES else "light"
 
 
+def palette() -> dict:
+    """Colori del tema corrente (per i widget che disegnano da sé)."""
+    return _PALETTES[current_theme()]
+
+
 # --------------------------------------------------------------------------- #
 # Badge
 # --------------------------------------------------------------------------- #
@@ -312,8 +317,8 @@ QSlider::handle:horizontal:hover {{ background: {p['accent_hover']}; }}
 QProgressBar {{
     background: {p['track']};
     border: none; border-radius: 4px;
-    height: 8px; text-align: center;
-    color: {p['text_muted']}; font-size: 11px;
+    min-height: 18px; max-height: 18px; text-align: center;
+    color: {p['text']}; font-size: 11px;
 }}
 QProgressBar::chunk {{ background: {p['accent']}; border-radius: 4px; }}
 

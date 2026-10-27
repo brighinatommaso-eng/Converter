@@ -4,7 +4,7 @@ A complete picture of the app: what it is, how it's built, the principles and co
 the work done so far, the bugs solved, and my (the owner's) working preferences. Written so a
 future session can pick up with full context without re-deriving everything.
 
-- **App:** Converter `0.1.4` — *"Convert files locally — honest about quality."*
+- **App:** Converter `0.1.5` — *"Convert files locally — honest about quality."*
 - **Stack:** Python 3.13 + PySide6 (Qt6), offline desktop app, Windows-first.
 - **Last updated:** 2026-10-26.
 - **Note on authorship:** §§1–13 document how the application is built (reference, derived
@@ -852,4 +852,55 @@ caches it. The spec bundles it as `_internal/models/pp_doc_layoutv2.onnx`, and
 frozen `--selftest` checks `pdf layout AI model loads` and `pdf layout AI analyses a
 page`. Cost: +241 MB installed (model 205, onnxruntime 29, PDFium 7). Measured speed:
 about 1–1.6 s per page on 4 CPU cores.
+
+## 28. PDF → DOCX: one writer, editable and faithful (2026-10-27)
+
+**Why.** The user's requirement: an editable Word file and an identical-looking one
+must be the same file. Until now they were two options that excluded each other:
+- *structure*: real headings and tables, but one column and template spacing;
+- *visual*: one positioned frame per printed line, so the text could not be edited.
+
+**How (`docmodel/docx_faithful.py`)**, with native Word features only:
+- **Pages:** one section per PDF page (`Document.page_sizes`) with measured margins.
+  Sections end inside the page's last real paragraph (`_new_section`): python-docx's
+  extra empty paragraph slid onto a new page whenever a page was full.
+- **Columns:** side-by-side blocks (`_page_items`, by geometry) become a borderless
+  1-row table, one cell per column. Narrow "columns" under 36 pt merge into a
+  neighbour, and edges are clamped to the margins. Word section columns were tried
+  first and abandoned: LibreOffice rebalanced them and moved text across columns.
+- **Vertical position:** space-before and exact line pitch come from the PDF. Each
+  block returns the bottom it occupies *in Word*, which compensates the drift.
+- **Look of the text:**
+  - heading styles are kept but neutralised (no template blue, borders or spacing);
+  - fills become shading; light text is kept over shading or a page background;
+  - fonts are mapped to installed equivalents and narrowed with `w:w`, derived from
+    the AFM metrics that ship with pdfminer.
+- **Images:** a full-page image is anchored behind the text; an image with text beside
+  it is anchored with square wrap.
+- **Headers and footers:**
+  - repeated margins become the Word header/footer, page numbers a PAGE field;
+  - short text in the bottom 9 % of a page becomes that section's own footer;
+  - sections that follow get the common footer back explicitly.
+- **OCR pages** keep the recognised text and drop the scan image.
+
+**Reader fixes found while measuring** (both engines):
+- off-page content is dropped (Reliance's spread pages carried each other's text);
+- clipped images no longer reappear (`looks_blank`);
+- empty pages keep their page break;
+- control characters no longer crash python-docx;
+- fills (`_fill_color`) are collected;
+- figure regions close to each other are grouped with their labels
+  (`_group_figures`).
+
+**Measured** (32 corpus PDFs → DOCX → LibreOffice PDF, page counts): 15 → **24**
+identical. failure-after-repair went 76 → 150 → **88** pages. All files open
+without error; before, 2 crashed on control characters. Remaining gaps:
+- Korean, where the CJK font metrics are unknown;
+- dense infographics (GAO);
+- formula-heavy pages;
+- pages with long hyphenated compounds.
+
+**Progress bar:** `gui/progress_bar.TwoToneProgressBar` draws the percentage twice,
+clipped (white over the chunk, dark over the track). It replaced one grey label that
+the blue chunk hid.
 

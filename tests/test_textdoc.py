@@ -260,7 +260,7 @@ def test_pdf_to_docx_builds_real_word_structure(rich_pdf, tmp_path):
     from docx import Document as Docx
 
     out = tmp_path / "out.docx"
-    result = run_job(_job(rich_pdf, "docx", out, docx_layout="structure"))
+    result = run_job(_job(rich_pdf, "docx", out))
     assert result.ok, result.error
 
     docx = Docx(str(out))
@@ -283,30 +283,31 @@ def test_pdf_to_docx_builds_real_word_structure(rich_pdf, tmp_path):
     assert heading.runs[0].font.name in ("Calibri", "Carlito")
 
 
-def test_pdf_to_docx_visual_layout_uses_absolute_frames(rich_pdf, tmp_path):
+def test_pdf_to_docx_is_laid_out_like_the_original(rich_pdf, tmp_path):
+    """Un solo docx, modificabile E impaginato: una sezione per pagina con le misure
+    dell'originale, nessun riquadro per riga (il testo resta un paragrafo vero)."""
+    import pypdfium2 as pdfium
     from docx import Document as Docx
-    from docx.oxml.ns import qn
 
-    out = tmp_path / "visual.docx"
-    result = run_job(_job(rich_pdf, "docx", out, docx_layout="visual"))
+    out = tmp_path / "laid-out.docx"
+    result = run_job(_job(rich_pdf, "docx", out))
     assert result.ok, result.error
-
     docx = Docx(str(out))
-    framed = []
-    for paragraph in docx.paragraphs:
-        p_pr = paragraph._p.pPr
-        frame = p_pr.find(qn("w:framePr")) if p_pr is not None else None
-        if frame is not None and paragraph.text.strip():
-            framed.append((paragraph.text.strip(), int(frame.get(qn("w:y")))))
-    texts = [text for text, _ in framed]
-    assert REPORT in texts
-    assert any("Ship v2 in October" in text for text in texts)  # il proiettile torna nel layout visivo
-    # Righe diverse stanno a quote diverse: non è un flusso, è un layout.
-    assert len({y for _, y in framed}) > 5
-    # Anche la pagina 2 è posizionata (e separata da un salto pagina).
-    assert "Appendix" in texts
-    xml = docx.element.xml
-    assert xml.count("w:type=\"page\"") >= 1
+    source = pdfium.PdfDocument(str(rich_pdf))
+    assert len(docx.sections) == len(source)            # una sezione per pagina
+    width, height = source[0].get_size()
+    assert docx.sections[0].page_width.pt == pytest.approx(width, abs=1)
+    assert docx.sections[0].page_height.pt == pytest.approx(height, abs=1)
+    # Margini misurati sul PDF, non quelli del modello Word (72pt).
+    assert docx.sections[0].left_margin.pt != pytest.approx(72.0, abs=0.5)
+    assert not docx.element.xpath(".//w:framePr")          # niente righe-riquadro
+    body = next(p for p in docx.paragraphs if p.text.startswith("Revenue grew"))
+    assert body.paragraph_format.line_spacing is not None  # interlinea dell'originale
+    # I titoli restano titoli Word, ma senza il blu del modello.
+    heading = next(p for p in docx.paragraphs if p.text == "1. Summary")
+    assert heading.style.name == "Heading 1"
+    assert heading.style.font.color.rgb is None
+    assert docx.sections[1].start_type is not None
 
 
 def test_pdf_to_html_is_semantic(rich_pdf, tmp_path):
