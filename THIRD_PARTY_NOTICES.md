@@ -8,7 +8,7 @@ archive so the notices travel with the binary.
 Versions are indicative (the ones used for the reference build); a build may
 differ slightly.
 
-## Python packages bundled in the Windows release
+## Python packages bundled in the Windows and Linux releases
 
 | Component | License | Notes |
 |-----------|---------|-------|
@@ -18,7 +18,7 @@ differ slightly.
 | pandas | BSD-3-Clause | data conversions |
 | numpy | BSD-3-Clause | required by pandas |
 | openpyxl | MIT | XLSX read/write |
-| odfpy | Apache-2.0 **or** GPL-2.0+ | used here under Apache-2.0 |
+| odfpy | Apache-2.0 **or** GPL-2.0+ | used here under Apache-2.0; ODS and the markup engine's ODT read/write |
 | PyYAML | MIT | YAML |
 | defusedxml | PSFL | safe XML parsing |
 | pdfminer.six | MIT | PDF layout extraction (structured document engine) |
@@ -26,6 +26,8 @@ differ slightly.
 | lxml | BSD-3-Clause | required by python-docx |
 | striprtf | BSD | rtf→txt |
 | trimesh | MIT | 3D mesh conversions |
+| markdown-it-py | MIT | Markdown reader of the markup engine (CommonMark/GFM) |
+| mdurl | MIT | required by markdown-it-py |
 
 ## Bundled command-line tools (separate executables)
 
@@ -51,17 +53,6 @@ a GPL tool whose license text is missing).
 
 Upstream FFmpeg core is LGPL-2.1+; when built with `--enable-gpl` (as here) the
 whole binary is covered by the GPL, and `--enable-version3` selects GPLv3.
-
-### pandoc
-
-| | |
-|---|---|
-| **Version** | 3.10 |
-| **License** | **GPL-2.0-or-later** |
-| **Official project site** | <https://pandoc.org/> |
-| **Source code** | <https://github.com/jgm/pandoc> · this version: <https://github.com/jgm/pandoc/tree/3.10> |
-| **Official binaries** | <https://github.com/jgm/pandoc/releases> · this version: <https://github.com/jgm/pandoc/releases/tag/3.10> |
-| **License text shipped** | `licenses/pandoc-GPLv2.txt` |
 
 ## Qt / PySide6 (LGPL-3.0) — dynamic linking
 

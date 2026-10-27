@@ -50,7 +50,7 @@ def refresh_deps() -> None:
 
     `find_*` sono memoizzate con lru_cache: senza svuotarle, un tool installato
     a runtime continuerebbe a risultare assente."""
-    for fn in (deps.find_ffmpeg, deps.find_ffprobe, deps.find_soffice, deps.find_pandoc,
+    for fn in (deps.find_ffmpeg, deps.find_ffprobe, deps.find_soffice,
                deps.find_tesseract, deps.find_ghostscript, deps.find_ocrmypdf):
         clear = getattr(fn, "cache_clear", None)
         if clear is not None:  # robusto se la funzione è stata sostituita nei test

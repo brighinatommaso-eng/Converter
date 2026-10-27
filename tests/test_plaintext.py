@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import converter.converters  # noqa: F401
 from converter.converters.plaintext import PlainTextMarkdownConverter, text_to_markdown
-from converter.core import deps, registry
+from converter.core import registry
 from converter.core.job import ConversionJob
 from converter.core.pipeline import run_job
 
 
-def test_txt_to_md_is_routed_in_process_even_without_pandoc(monkeypatch):
-    monkeypatch.setattr(deps, "find_pandoc", lambda: None)
+def test_txt_to_md_is_routed_to_the_line_by_line_converter():
+    # Il motore markup (priorità 12) legge il txt come paragrafi: per txt→md vince
+    # plaintext (15), che tiene ogni riga com'è.
     assert isinstance(registry.resolve("txt", "md"), PlainTextMarkdownConverter)
 
 

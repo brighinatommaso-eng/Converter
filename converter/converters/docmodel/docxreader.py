@@ -1,7 +1,7 @@
 """Lettore DOCX → IR (python-docx, MIT).
 
-Serve alle coppie docx→md/txt: pandoc le copre già, ma produce "grid table" e
-appiattisce i titoli nel front-matter. Qui la struttura Word (Heading N, liste,
+Serve alle coppie docx→md/txt: pandoc (usato un tempo) produceva "grid table" e
+appiattiva i titoli nel front-matter. Qui la struttura Word (Heading N, liste,
 tabelle con header) arriva all'IR e quindi a un Markdown GFM pulito.
 
 Il lettore conserva anche ciò che Word mette fuori dai semplici `paragraph.runs`:

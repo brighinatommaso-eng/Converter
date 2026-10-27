@@ -1,6 +1,6 @@
 """Rilevamento delle dipendenze esterne e degrado controllato.
 
-L'app non deve crashare se manca ffmpeg/LibreOffice/pandoc: deve disabilitare
+L'app non deve crashare se manca ffmpeg/LibreOffice: deve disabilitare
 solo le conversioni interessate e dire all'utente come installare ciò che serve.
 I percorsi NON sono assunti solo da PATH (così l'app resta impacchettabile):
 si cerca anche in posizioni comuni e in una cartella "bin" accanto all'eseguibile.
@@ -27,7 +27,7 @@ class DependencyStatus:
 
 
 def clean_subprocess_env() -> dict[str, str]:
-    """Ambiente per i tool esterni (LibreOffice, ffmpeg, pandoc...).
+    """Ambiente per i tool esterni (LibreOffice, ffmpeg, OCRmyPDF...).
 
     Un eseguibile congelato con PyInstaller inietta nell'ambiente variabili che
     riferiscono al SUO runtime Python e alla cartella del bundle. Se le ereditasse,
@@ -123,11 +123,6 @@ def find_soffice() -> str | None:
 
 
 @cache
-def find_pandoc() -> str | None:
-    return _locate("pandoc")
-
-
-@cache
 def find_tesseract() -> str | None:
     extra = [r / "Tesseract-OCR" for r in _windows_common()]
     return _locate("tesseract", extra)
@@ -199,14 +194,6 @@ def libreoffice_install_hint() -> str:
     )
 
 
-def pandoc_install_hint() -> str:
-    return _hint(
-        win="winget install JohnMacFarlane.Pandoc",
-        mac="brew install pandoc",
-        linux="sudo apt install pandoc",
-    )
-
-
 def tesseract_install_hint() -> str:
     return _hint(
         win="winget install UB-Mannheim.TesseractOCR",
@@ -240,13 +227,6 @@ def report() -> dict[str, DependencyStatus]:
     else:
         items["LibreOffice (documents)"] = DependencyStatus(
             False, "LibreOffice was not found.", libreoffice_install_hint()
-        )
-
-    if find_pandoc():
-        items["Pandoc (documents)"] = DependencyStatus(True)
-    else:
-        items["Pandoc (documents)"] = DependencyStatus(
-            False, "Pandoc was not found.", pandoc_install_hint()
         )
 
     if find_tesseract():

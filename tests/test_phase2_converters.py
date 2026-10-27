@@ -1,4 +1,4 @@
-"""Conversioni REALI di Fase 2 (pdfminer / pandoc / striprtf).
+"""Conversioni REALI di Fase 2 (pdfminer / motore markup / striprtf).
 
 Eseguite in PORTABLE per provare che NON serve LibreOffice. Ogni gruppo fa skip se
 il suo motore manca (come i test ffmpeg/document) — controllare il conteggio skip."""
@@ -12,13 +12,13 @@ from converter.core import deps, engine
 from converter.core.job import ConversionJob
 from converter.core.pipeline import run_job
 
-pandoc = pytest.mark.skipif(deps.find_pandoc() is None, reason="pandoc not installed")
+markup = pytest.mark.skipif(not deps.has_module("markdown_it"), reason="markdown-it-py not installed")
 pdfminer = pytest.mark.skipif(not deps.has_module("pdfminer"), reason="pdfminer.six not installed")
 striprtf = pytest.mark.skipif(not deps.has_module("striprtf"), reason="striprtf not installed")
 
-_ALL_PURE = (deps.find_pandoc() is not None and deps.has_module("pdfminer")
+_ALL_PURE = (deps.has_module("markdown_it") and deps.has_module("pdfminer")
              and deps.has_module("striprtf"))
-needs_all = pytest.mark.skipif(not _ALL_PURE, reason="needs pandoc+pdfminer+striprtf")
+needs_all = pytest.mark.skipif(not _ALL_PURE, reason="needs markdown-it-py+pdfminer+striprtf")
 
 
 @pytest.fixture(autouse=True)
@@ -59,9 +59,9 @@ def _make_min_pdf(path: Path, text: str = "Hello PDF") -> None:
     path.write_bytes(bytes(out))
 
 
-# --- pandoc -----------------------------------------------------------------
+# --- motore markup (in-process, ha sostituito pandoc) ---------------------------
 
-@pandoc
+@markup
 def test_md_to_html_lossless(tmp_path):
     src = tmp_path / "a.md"
     src.write_text("# Title\n\nHello **world**\n", encoding="utf-8")
@@ -73,7 +73,7 @@ def test_md_to_html_lossless(tmp_path):
     assert "<h1" in body and "Hello" in body
 
 
-@pandoc
+@markup
 def test_html_to_md_lossy(tmp_path):
     src = tmp_path / "a.html"
     src.write_text("<h1>Title</h1><p>Hello <b>world</b></p>", encoding="utf-8")
@@ -84,7 +84,7 @@ def test_html_to_md_lossy(tmp_path):
     assert "Title" in out.read_text(encoding="utf-8")
 
 
-@pandoc
+@markup
 def test_md_to_docx_produces_real_docx(tmp_path):
     import zipfile
     src = tmp_path / "a.md"
@@ -96,7 +96,7 @@ def test_md_to_docx_produces_real_docx(tmp_path):
     assert zipfile.is_zipfile(out)  # un docx è un pacchetto ZIP valido
 
 
-@pandoc
+@markup
 def test_md_to_epub_then_epub_to_html(tmp_path):
     md = tmp_path / "a.md"
     md.write_text("# Chapter\n\nContent here.\n", encoding="utf-8")

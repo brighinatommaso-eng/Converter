@@ -98,4 +98,4 @@ def test_preset_validity():
     assert Preset("a", "jpg", {}).valid is True
     assert Preset("a", "pdf", {}).valid is True          # ora prodotto dal converter documenti (Tier E)
     assert Preset("a", "nope", {}).valid is False        # formato inesistente: nessun converter lo produce
-    assert Preset("a", "epub", {}).valid is True         # Fase 2: ora prodotto da MarkupConverter (pandoc)
+    assert Preset("a", "epub", {}).valid is True         # prodotto dal motore markup in-process

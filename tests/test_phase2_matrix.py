@@ -14,9 +14,8 @@ from converter.core.registry import resolve, targets_for
 
 @pytest.fixture
 def all_engines(monkeypatch):
-    """Finge presenti LibreOffice, pandoc, pdfminer, striprtf e python-docx."""
+    """Finge presenti LibreOffice, pdfminer, striprtf e python-docx."""
     monkeypatch.setattr(deps, "find_soffice", lambda: r"C:\LibreOffice\program\soffice.exe")
-    monkeypatch.setattr(deps, "find_pandoc", lambda: r"C:\pandoc.exe")
     real_has = deps.has_module
     monkeypatch.setattr(deps, "has_module",
                         lambda n: True if n in ("pdfminer", "striprtf", "docx") else real_has(n))
@@ -53,7 +52,7 @@ def test_pdf_to_text_documents_via_structured_engine(all_engines, mode):
             assert "Full mode" in t[dst].reason_unavailable
 
 
-# --- Markup md/epub (pandoc, entrambe le modalità) --------------------------
+# --- Markup md/epub (motore in-process, entrambe le modalità) ----------------
 
 @pytest.mark.parametrize("mode", ["FULL", "PORTABLE"])
 def test_md_conversions_available_both_modes(all_engines, mode):
@@ -63,7 +62,7 @@ def test_md_conversions_available_both_modes(all_engines, mode):
     assert t["docx"].available is True and t["docx"].verdict.is_lossy  # md→docx (richiesto)
     assert _engine("md", "html") == "MarkupConverter"
     assert _engine("md", "docx") == "MarkupConverter"
-    # md→pdf è IMPOSSIBILE (LibreOffice non legge md, pandoc non scrive pdf).
+    # md→pdf non esiste: LibreOffice non legge md e il motore markup non scrive pdf.
     assert "pdf" not in t
 
 

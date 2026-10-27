@@ -4,7 +4,7 @@ Niente nuovo comportamento: invarianti ESAUSTIVE sul prodotto cartesiano di tutt
 i formati 'document' × {FULL, PORTABLE}. Bloccano regressioni future:
 
   1. PORTABLE non tocca MAI LibreOffice: ogni coppia disponibile è instradata a un
-     motore puro (pdfminer/pandoc/striprtf), non al DocumentConverter.
+     motore puro (pdfminer/markup/striprtf), non al DocumentConverter.
   2. Onestà del greying: ogni coppia in grigio ha un motivo NON vuoto; le coppie
      disponibili in FULL ma in grigio in PORTABLE citano "Full mode".
   3. Coerenza del verdetto: targets_for(...).verdict == resolve(...).verdict.
@@ -24,7 +24,6 @@ DOC_FORMATS = sorted(f for f, meta in FORMATS.items() if meta.category == "docum
 def all_engines(monkeypatch):
     """Tutti i motori 'presenti': la matrice non deve dipendere da cosa è installato."""
     monkeypatch.setattr(deps, "find_soffice", lambda: r"C:\LibreOffice\program\soffice.exe")
-    monkeypatch.setattr(deps, "find_pandoc", lambda: r"C:\pandoc.exe")
     real_has = deps.has_module
     monkeypatch.setattr(deps, "has_module",
                         lambda n: True if n in ("pdfminer", "striprtf") else real_has(n))

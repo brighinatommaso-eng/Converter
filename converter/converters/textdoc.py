@@ -6,7 +6,7 @@ Copre le coppie in cui l'app PERDEVA struttura:
                                                 nel front-matter, nessun livello)
 
 Le altre direzioni restano ai motori che le fanno già bene (LibreOffice per
-office↔office e docx→html con i colori, pandoc per md/html/txt→office). Il
+office↔office e docx→html con i colori, il motore markup per md/html/txt→office). Il
 registry sceglie per priorità, quindi qui si rivendicano SOLO queste coppie.
 
 Perché è un converter e non "un modello AI": un LLM non aggiunge struttura a un
@@ -80,7 +80,7 @@ class TextDocConverter(Converter):
     name = "Text documents (structure)"
     input_formats = _INPUTS
     output_formats = _OUTPUTS
-    # Batte pdfminer (10) su pdf→txt/html e pandoc (10) sulle coppie che questo
+    # Batte pdfminer (10) su pdf→txt/html e il motore markup (12) sulle coppie che questo
     # motore ricostruisce meglio.
     priority = 20
 

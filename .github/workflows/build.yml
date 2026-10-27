@@ -101,20 +101,6 @@ jobs:
           if (-not $ffbin) { throw "ffmpeg.exe non trovato nell'archivio" }
           $ffbin >> $env:GITHUB_PATH
 
-      - name: pandoc
-        timeout-minutes: 10
-        run: |
-          $tools = Join-Path $env:RUNNER_TEMP "tools"
-          New-Item -ItemType Directory -Force $tools | Out-Null
-          # Ultima release ufficiale (jgm/pandoc), zip x86_64.
-          gh release download --repo jgm/pandoc --pattern "pandoc-*-windows-x86_64.zip" --dir $tools --clobber
-          if ($LASTEXITCODE -ne 0) { throw "download di pandoc fallito" }
-          $pzip = Get-ChildItem $tools -Filter "pandoc-*-windows-x86_64.zip" | Select-Object -First 1
-          Expand-Archive $pzip.FullName -DestinationPath "$tools\pandoc" -Force
-          $pbin = (Get-ChildItem "$tools\pandoc" -Recurse -Filter pandoc.exe | Select-Object -First 1).DirectoryName
-          if (-not $pbin) { throw "pandoc.exe non trovato nello zip" }
-          $pbin >> $env:GITHUB_PATH
-
       - name: Inno Setup
         timeout-minutes: 10
         run: |
@@ -135,11 +121,10 @@ jobs:
       - name: Tool versions
         run: |
           ffmpeg -hide_banner -version | Select-Object -First 1
-          pandoc --version | Select-Object -First 1
           $so = Get-Item "C:\Program Files\LibreOffice\program\soffice.exe" -ErrorAction SilentlyContinue
           if ($so) { "LibreOffice " + $so.VersionInfo.ProductVersion }
           else { "::warning::LibreOffice non installato: il selftest salta i controlli della modalità FULL" }
-          exit 0   # pipe chiusa da Select-Object: il codice d'uscita di pandoc qui non conta
+          exit 0   # pipe chiusa da Select-Object: il codice d'uscita di ffmpeg qui non conta
 
       - name: PyInstaller
         run: |
@@ -246,8 +231,8 @@ jobs:
       - name: Python dependencies
         run: pip install -r requirements.txt "pyinstaller>=6.10"
 
-      # ffmpeg/ffprobe/pandoc STATICI per l'AppImage (il .deb usa quelli del sistema).
-      - name: Static ffmpeg and pandoc
+      # ffmpeg/ffprobe STATICI per l'AppImage (il .deb usa quelli del sistema).
+      - name: Static ffmpeg
         timeout-minutes: 15
         run: |
           tools="$RUNNER_TEMP/tools"; mkdir -p "$tools/bin"
@@ -259,12 +244,8 @@ jobs:
           tar -xJf "$archive" -C "$tools"
           ffbin="$(dirname "$(find "$tools" -type f -name ffmpeg -path '*/bin/*' | head -1)")"
           cp "$ffbin/ffmpeg" "$ffbin/ffprobe" "$tools/bin/"
-          gh release download --repo jgm/pandoc --pattern 'pandoc-*-linux-amd64.tar.gz' --dir "$tools"
-          tar -xzf "$(find "$tools" -maxdepth 1 -name 'pandoc-*-linux-amd64.tar.gz' | head -1)" -C "$tools"
-          cp "$(find "$tools" -type f -name pandoc -path '*/bin/*' | head -1)" "$tools/bin/"
           file "$tools"/bin/*
           "$tools/bin/ffmpeg" -hide_banner -version | head -1
-          "$tools/bin/pandoc" --version | head -1
           echo "TOOLS_BIN=$tools/bin" >> "$GITHUB_ENV"
 
       # Come su Windows: solo perché il selftest copra la modalità FULL, best-effort.
@@ -273,18 +254,18 @@ jobs:
         continue-on-error: true
         run: sudo apt-get install -y -q --no-install-recommends libreoffice-writer
 
-      - name: PyInstaller (AppImage, tools bundled)
+      - name: PyInstaller (AppImage, ffmpeg bundled)
         run: |
           PATH="$TOOLS_BIN:$PATH" pyinstaller converter.spec --noconfirm --clean \
             --distpath dist-appimage --workpath build-appimage
-          for t in ffmpeg ffprobe pandoc; do
+          for t in ffmpeg ffprobe; do
             test -x "dist-appimage/Converter/_internal/bin/$t" || { echo "::error::$t non nel bundle"; exit 1; }
           done
           du -sh dist-appimage/Converter
           find dist-appimage/Converter -type f -printf '%s %P\n' | sort -rn | head -15 |
             awk '{ printf "%8.1f MB  %s\n", $1 / 1048576, $2 }'
 
-      - name: PyInstaller (.deb, system tools)
+      - name: PyInstaller (.deb, system ffmpeg)
         run: |
           CONVERTER_BUNDLE_TOOLS=0 pyinstaller converter.spec --noconfirm --clean \
             --distpath dist-deb --workpath build-deb
@@ -337,9 +318,12 @@ jobs:
           dpkg-deb --info dist/converter_*_amd64.deb
 
       - name: .deb round-trip (install, selftest, remove)
-        timeout-minutes: 15
+        timeout-minutes: 25
         run: |
-          sudo apt-get install -y -q ./dist/converter_*_amd64.deb
+          # Solo le dipendenze vere: con i "Recommends" ffmpeg tira dentro driver VA,
+          # pocketsphinx (27 MB)… e da un mirror lento il passo andava in timeout.
+          sudo apt-get install -y -q --no-install-recommends -o Acquire::Retries=3 \
+            ./dist/converter_*_amd64.deb
           test -x /usr/bin/converter
           desktop-file-validate /usr/share/applications/converter.desktop
           report="$RUNNER_TEMP/selftest-deb.txt"

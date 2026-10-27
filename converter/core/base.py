@@ -24,7 +24,7 @@ class Converter(ABC):
     output_formats: frozenset[str] = frozenset()
 
     # Priorità di routing: a parità di coppia gestibile vince la priorità più alta.
-    # I motori specifici (pdfminer, pandoc, striprtf) la alzano per battere il
+    # I motori specifici (pdfminer, markup, striprtf) la alzano per battere il
     # converter generico LibreOffice sulle coppie sovrapposte (es. docx→html).
     priority: int = 0
 
