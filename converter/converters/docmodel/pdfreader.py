@@ -1440,12 +1440,46 @@ def iter_pdf_pages(handle, maxpages: int = 0):
         yield page
 
 
-def read_pdf(path: Path) -> Document:
+class ReadCancelled(Exception):
+    """L'utente ha annullato durante la lettura (controllato a ogni pagina)."""
+
+
+def _open_layout_pages(path: Path, use_ai: bool):
+    """(pagine PDFium per l'analisi AI | None, motivo se non disponibile)."""
+    from . import layout_ai
+
+    if not use_ai:
+        return None, ""
+    analyzer = layout_ai.get_analyzer()
+    if analyzer is None:
+        return None, layout_ai.unavailable_reason() or "AI layout analysis is not available"
+    try:
+        return analyzer.open(path), ""
+    except Exception as exc:     # PDFium non apre il file che pdfminer legge
+        return None, f"the page renderer could not open this PDF ({exc})"
+
+
+def _page_regions(layout_pages, index: int):
+    if layout_pages is None:
+        return None
+    try:
+        regions = layout_pages.regions(index)
+    except Exception:
+        return None
+    return regions or None
+
+
+def read_pdf(path: Path, *, use_ai: bool = True, progress=None, cancel=None) -> Document:
     """PDF → Document. Solleva ValueError con messaggio pulito se il PDF è illeggibile.
 
     Una pagina che non si riesce a interpretare viene saltata e contata in
     `Document.skipped_pages`: un difetto locale non deve costare l'intero file,
-    ma nemmeno sparire in silenzio (il verdetto lo dichiara)."""
+    ma nemmeno sparire in silenzio (il verdetto lo dichiara).
+
+    Con `use_ai` ogni pagina passa anche dal modello di layout (`layout_ai`), se
+    installato; una pagina che il modello non sa analizzare usa l'euristica.
+    `progress(fatte, totali)` è chiamata a ogni pagina, `cancel()` vero la ferma
+    con `ReadCancelled`."""
     from pdfminer.converter import PDFPageAggregator
     from pdfminer.image import ImageWriter
     from pdfminer.layout import LAParams
@@ -1456,40 +1490,60 @@ def read_pdf(path: Path) -> Document:
     manager = PDFResourceManager(caching=True)
     pages: list[dict] = []
     skipped = 0
-    with tempfile.TemporaryDirectory() as tmp_dir:
-        writer = ImageWriter(tmp_dir)
-        device = PDFPageAggregator(manager, laparams=LAParams())
-        interpreter = interpreter_class(manager, device)
-        try:
-            with open(path, "rb") as handle:
-                for page in iter_pdf_pages(handle):
-                    try:
-                        interpreter.process_page(page)
-                    except PDFPasswordIncorrect:
-                        raise
-                    except Exception:
-                        skipped += 1
-                        continue
-                    pages.append(_collect_page(device.get_result(), writer, tmp_dir))
-        except PDFPasswordIncorrect as exc:
-            raise ValueError(
-                "Could not read this PDF: it is password-protected.") from exc
-        except Exception as exc:
-            raise ValueError(f"Could not read this PDF: {exc}") from exc
+    layout_pages, ai_unavailable = _open_layout_pages(path, use_ai)
+    total = layout_pages.count if layout_pages is not None else 0
+    try:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            writer = ImageWriter(tmp_dir)
+            # all_texts: senza, pdfminer NON raggruppa in righe il testo dentro i
+            # Form XObject (impaginati InDesign, report, moduli compilati): restava
+            # LTChar sciolto e il lettore lo saltava. Su 4 PDF del corpus si
+            # perdeva dal 20 al 97% del testo, in silenzio.
+            device = PDFPageAggregator(manager, laparams=LAParams(all_texts=True))
+            interpreter = interpreter_class(manager, device)
+            try:
+                with open(path, "rb") as handle:
+                    for index, page in enumerate(iter_pdf_pages(handle)):
+                        if cancel is not None and cancel():
+                            raise ReadCancelled()
+                        try:
+                            interpreter.process_page(page)
+                        except PDFPasswordIncorrect:
+                            raise
+                        except Exception:
+                            skipped += 1
+                            continue
+                        collected = _collect_page(device.get_result(), writer, tmp_dir)
+                        collected["index"] = index
+                        collected["regions"] = _page_regions(layout_pages, index)
+                        pages.append(collected)
+                        if progress is not None:
+                            progress(index + 1, max(total, index + 1))
+            except ReadCancelled:
+                raise
+            except PDFPasswordIncorrect as exc:
+                raise ValueError(
+                    "Could not read this PDF: it is password-protected.") from exc
+            except Exception as exc:
+                raise ValueError(f"Could not read this PDF: {exc}") from exc
 
-        if not pages:
-            if skipped:
-                raise ValueError(f"Could not read this PDF: none of its {skipped} page(s) "
-                                 f"could be interpreted.")
-            raise ValueError("Could not read this PDF: it has no pages.")
+            if not pages:
+                if skipped:
+                    raise ValueError(f"Could not read this PDF: none of its {skipped} page(s) "
+                                     f"could be interpreted.")
+                raise ValueError("Could not read this PDF: it has no pages.")
 
-        page_width = max(p["width"] for p in pages) or 595.0
-        page_height = max(p["height"] for p in pages) or 842.0
-        _drop_repeated_margins(pages, page_height)
-        document = _assemble(pages, page_width, page_height)
-        document.skipped_pages = skipped
-        document.undecoded_chars = _count_undecoded(document)
-        return document
+            page_width = max(p["width"] for p in pages) or 595.0
+            page_height = max(p["height"] for p in pages) or 842.0
+            _drop_repeated_margins(pages, page_height)
+            document = _assemble(pages, page_width, page_height, layout_pages)
+            document.skipped_pages = skipped
+            document.undecoded_chars = _count_undecoded(document)
+            document.ai_unavailable = ai_unavailable
+            return document
+    finally:
+        if layout_pages is not None:
+            layout_pages.close()
 
 
 def _count_undecoded(document: Document) -> int:
@@ -1506,7 +1560,8 @@ def _count_undecoded(document: Document) -> int:
                for line in paragraph.lines for run in line.runs)
 
 
-def _assemble(pages: list[dict], page_width: float, page_height: float) -> Document:
+def _assemble(pages: list[dict], page_width: float, page_height: float,
+              layout_pages=None) -> Document:
     document = Document(page_width_pt=page_width, page_height_pt=page_height,
                         source_format="pdf")
 
@@ -1518,11 +1573,23 @@ def _assemble(pages: list[dict], page_width: float, page_height: float) -> Docum
         lines = _merge_fragments(page["lines"])
         table_lines: set[int] = set()
         tables: list[Table] = []
+        ruled_lines: list[set[int]] = []
         for component in _connected_components(page["segments"]):
             built = _build_table(page["segments"], component, lines, page_width)
             if built is not None:
                 tables.append(built[0])
+                ruled_lines.append(set(built[1]))
                 table_lines.update(built[1])
+
+        if page.get("regions"):
+            page_blocks = _ai_page_blocks(page, lines, tables, ruled_lines, layout_pages,
+                                          text_left, text_right)
+            document.ai_pages += 1
+            if page_index > 0 and page_blocks:
+                document.blocks.append(PageBreak())
+            document.blocks.extend(page_blocks)
+            continue
+        document.heuristic_pages += 1
 
         aligned = _build_aligned_tables(page["lines"], page_height, tables, _page_gutters(lines))
         tables.extend(aligned)
@@ -1554,6 +1621,487 @@ def _assemble(pages: list[dict], page_width: float, page_height: float) -> Docum
     return document
 
 
+# --- Ricostruzione guidata dal modello AI di layout -------------------------
+
+# Etichette del modello (PP-DocLayoutV2) raggruppate per ciò che diventano.
+_AI_FIGURES = {"image", "chart", "display_formula", "seal", "header_image", "footer_image"}
+_AI_TITLES = {"doc_title", "paragraph_title"}
+_AI_IGNORED = {"inline_formula"}     # formule dentro una riga: il testo resta al paragrafo
+_AI_PROSE = {"text", "abstract", "content", "reference_content", "footnote",
+             "vision_footnote", "algorithm", "aside_text", "vertical_text", "reference"}
+_PAGE_NUMBER_RE = re.compile(
+    r"^\W*(\d{1,4}|[ivxlcdm]{1,6}|(page|pagina|pag\.|p\.)\s*\d{1,4}"
+    r"(\s*(of|di|/)\s*\d{1,4})?)\W*$", re.IGNORECASE)
+_FIGURE_MAX_TEXT = 600     # oltre questi caratteri una "figura" è testo riconosciuto male
+_ASSIGN_MIN = 0.5          # quota della riga che deve cadere nella regione
+
+
+def _line_area(line: Line) -> float:
+    return max(line.width, 1.0) * max(line.height, 1.0)
+
+
+def _best_region(x0: float, y0: float, x1: float, y1: float, regions) -> int | None:
+    """Indice della regione che contiene di più il rettangolo (la più piccola a parità)."""
+    area = max(x1 - x0, 1.0) * max(y1 - y0, 1.0)
+    best: tuple[float, float, int] | None = None
+    for index, region in enumerate(regions):
+        share = region.overlap(x0, y0, x1, y1) / area
+        if share < _ASSIGN_MIN:
+            continue
+        key = (round(share, 2), -region.area, index)
+        if best is None or key[:2] > best[:2]:
+            best = key
+    return None if best is None else best[2]
+
+
+def _center_in(block, region, pad: float = 2.0) -> bool:
+    if isinstance(block, ImageBlock):
+        cx, cy = block.x + block.width_pt / 2, block.y + block.height_pt / 2
+    else:
+        cx, cy = block.x + block.width / 2, block.y + block.height / 2
+    return (region.x0 - pad <= cx <= region.x1 + pad
+            and region.y0 - pad <= cy <= region.y1 + pad)
+
+
+def _merge_formula_numbers(regions):
+    """Il numero "(3)" accanto a una formula va nel ritaglio della formula."""
+    formulas = [r for r in regions if r.kind == "display_formula"]
+    kept = []
+    for region in regions:
+        if region.kind == "formula_number":
+            mid = (region.y0 + region.y1) / 2
+            target = next((f for f in formulas if f.y0 - 4 <= mid <= f.y1 + 4), None)
+            if target is not None:
+                target.x0, target.x1 = min(target.x0, region.x0), max(target.x1, region.x1)
+                target.y0, target.y1 = min(target.y0, region.y0), max(target.y1, region.y1)
+                continue
+            region.kind = "text"
+        kept.append(region)
+    return kept
+
+
+def _table_from_region_lines(lines: list[Line], bordered: bool) -> Table | None:
+    """Tabella dalle righe di una regione che il modello ha riconosciuto come tabella.
+
+    Qui non servono le guardie del motore euristico (che deve indovinare se un
+    allineamento È una tabella): lo dice il modello. Resta da ricostruire la
+    griglia: colonne dagli inizi delle celle, righe dalle basi comuni, e le righe
+    di seguito (cella su più righe: prima colonna vuota, subito sotto) riattaccate
+    alla riga sopra.
+    """
+    bands = _row_bands(lines)
+    if len(bands) < 2:
+        return None
+    band_cells = []
+    for _y, fragments in bands:
+        cells: list[_Cell] = []
+        for fragment in sorted(fragments, key=lambda item: item.x):
+            cells.extend(_line_cells(fragment))
+        band_cells.append(sorted(cells, key=lambda cell: cell[0]))
+    columns = _cluster([cell[0] for cells in band_cells for cell in cells], tol=_COLUMN_TOL)
+    columns = [column for column in columns
+               if sum(1 for cells in band_cells
+                      if any(abs(cell[0] - column) <= _COLUMN_TOL for cell in cells)) >= 2]
+    if len(columns) < 2:
+        return None
+    grids = [_assign_row(fragments, columns) for _y, fragments in bands]
+    grids, columns = _merge_sparse_columns(grids, columns)
+    if len(columns) < 2:
+        return None
+
+    rows: list[list[list[_Cell]]] = []
+    bottoms: list[float] = []
+    for (_y, fragments), grid in zip(bands, grids, strict=True):
+        if not any(grid):
+            continue
+        top = max(fragment.top for fragment in fragments)
+        height = max(fragment.height for fragment in fragments) or 10.0
+        filled = sum(1 for cell in grid if cell)
+        close = bool(rows) and bottoms[-1] - top <= 1.6 * height
+        continuation = (close and grid[0] is None and filled >= 1
+                        and filled < len(columns))
+        # Etichetta di riga unita ("DP" a metà fra due righe): solo la prima
+        # colonna, e la riga sopra ce l'ha vuota. Va alla riga sopra.
+        row_label = (close and grid[0] is not None and filled == 1
+                     and not rows[-1][0])
+        if continuation or row_label:
+            for index, cell in enumerate(grid):
+                if cell is not None:
+                    rows[-1][index].append(cell)
+            continuation = True
+        else:
+            rows.append([[cell] if cell is not None else [] for cell in grid])
+        bottoms.append(min(fragment.y for fragment in fragments))
+        if continuation:
+            bottoms[-2:] = [bottoms[-1]]
+    if len(rows) < 2 or sum(1 for row in rows if sum(1 for cell in row if cell) >= 2) < 1:
+        return None
+
+    all_cells = [cell for row in rows for cells in row for cell in cells]
+    x0 = min(cell[0] for cell in all_cells)
+    x1 = max(cell[1] for cell in all_cells)
+    y0 = min(line.y for line in lines)
+    y1 = max(line.top for line in lines)
+    bounds = [x0] + [(columns[i] + columns[i + 1]) / 2 for i in range(len(columns) - 1)] + [x1]
+    widths = [max(1.0, bounds[i + 1] - bounds[i]) for i in range(len(bounds) - 1)]
+
+    output: list[list[TableCell]] = []
+    for row in rows:
+        out_row = []
+        for cells in row:
+            paragraphs = []
+            for cell in cells:
+                if cell[3].strip():
+                    line = Line(runs=[Run(text=cell[3], bold=cell[4], size=cell[5])],
+                                x=cell[0], y=cell[2], width=cell[1] - cell[0], height=cell[6])
+                    paragraphs.append(line)
+            out_row.append(TableCell(paragraphs=[Paragraph(lines=paragraphs)] if paragraphs else []))
+        output.append(out_row)
+    first = [cell for cells in rows[0] for cell in cells if cell[3].strip()]
+    header = 1 if first and all(cell[4] for cell in first) else 0
+    return Table(rows=output, widths_pt=widths, borders=bordered, header_rows=header,
+                 x=x0, y=y0, width=x1 - x0, height=y1 - y0)
+
+
+def _segments_inside(segments, region) -> bool:
+    for _kind, (sx0, sy0, sx1, sy1) in segments:
+        if region.overlap(sx0 - 0.5, sy0 - 0.5, sx1 + 0.5, sy1 + 0.5) > 0:
+            return True
+    return False
+
+
+def _figure_block(region, members: list[Line], images: list[ImageBlock],
+                  layout_pages, page_index: int) -> ImageBlock | None:
+    """Immagine di una regione figura: l'originale se è una sola foto, altrimenti un ritaglio.
+
+    Il ritaglio della pagina renderizzata conserva anche i grafici VETTORIALI
+    (assi, curve, etichette) che pdfminer non estrae come immagine: prima quei
+    grafici sparivano e restavano solo i numeri degli assi come testo sparso.
+    """
+    if len(images) == 1 and region.kind != "display_formula":
+        image = images[0]
+        covered = region.overlap(image.x, image.y, image.right, image.top)
+        if covered >= 0.8 * region.area:
+            return image
+    if layout_pages is None:
+        return None
+    data = layout_pages.crop_png(page_index, region.x0, region.y0, region.x1, region.y1)
+    if data is None:
+        return None
+    return ImageBlock(data=data, ext="png", width_pt=region.x1 - region.x0,
+                      height_pt=region.y1 - region.y0, x=region.x0, y=region.y0)
+
+
+def _join_baselines(lines: list[Line]) -> list[Line]:
+    """Dentro una regione (una sola colonna) i pezzi sulla stessa base sono UNA riga.
+
+    pdfminer spezza le righe giustificate con spazi larghi ("facto method.   In
+    this work…"): fuori da una regione unirle rischia di fondere due colonne,
+    dentro una regione no, e lasciarle separate spezzava il paragrafo a metà.
+    """
+    ordered = sorted(lines, key=lambda ln: (-round(ln.y, 1), ln.x))
+    rows: list[Line] = []
+    for line in ordered:
+        if rows:
+            prev = rows[-1]
+            size = max(prev.size, line.size) or 10.0
+            if abs(prev.y - line.y) <= 0.35 * size and line.x >= prev.right - 1.0:
+                if prev.runs and not prev.runs[-1].text.endswith(" "):
+                    prev.runs[-1].text = prev.runs[-1].text.rstrip() + " "
+                prev.runs.extend(line.runs)
+                prev.words.extend(line.words)
+                prev.width = max(prev.width, line.right - prev.x)
+                prev.height = max(prev.height, line.height)
+                continue
+        rows.append(Line(runs=list(line.runs), words=list(line.words), x=line.x,
+                         y=line.y, width=line.width, height=line.height))
+    return rows
+
+
+_WEAK_BULLETS = "·∙"
+
+
+def _starts_item(text: str, paragraph_start: str) -> bool:
+    """La riga apre una nuova voce di elenco.
+
+    Il punto mediano "·" separa anche le parole chiave ("Deep Learning · Layout
+    Analysis") e può capitare a inizio riga per un a capo: conta come proiettile
+    solo se anche il paragrafo in corso era una voce con lo stesso segno.
+    """
+    if _ORDERED_RE.match(text):
+        return True
+    if not is_bullet(text):
+        return False
+    if text[0] in _WEAK_BULLETS:
+        return paragraph_start[:1] == text[0]
+    return True
+
+
+def _would_fit(prev: Line, line: Line, right: float) -> bool:
+    """L'a capo è voluto: la prima parola della riga dopo stava nello spazio rimasto.
+
+    Un testo che va a capo per mancanza di spazio non lascia mai in fondo alla
+    riga un vuoto più largo della parola seguente; se lo lascia, la riga è finita
+    lì apposta (elenco di righe, indirizzo, verso, voce di menu).
+    """
+    if not line.words:
+        return False
+    first = line.words[0]
+    word = first[1] - first[0]
+    room = right - prev.right
+    space = 0.3 * max(prev.size, line.size, 6.0)
+    return room > word + space + 2.0
+
+
+def _region_paragraphs(lines: list[Line], left: float, right: float) -> list[Paragraph]:
+    """Paragrafi di una regione di testo del modello.
+
+    Una regione è già un blocco di testo: le righe si uniscono anche con
+    un'interlinea larga (titoli coreani, testo a 1,5 righe) che l'euristica di
+    pagina deve trattare come confine. Si va a capo per un nuovo punto elenco, un
+    rientro di prima riga dopo una riga corta, un vuoto grande o un cambio di corpo.
+    """
+    rows = _join_baselines(lines)
+    if rows:
+        left = min(left, min(line.x for line in rows))
+        right = max(line.right for line in rows)     # margine vero del testo
+    width = max(right - left, 1.0)
+    paragraphs: list[Paragraph] = []
+    current: list[Line] = []
+    for line in rows:
+        if current:
+            prev = current[-1]
+            size = max(prev.size, line.size, 1.0)
+            gap = prev.y - line.top
+            text = line.text.lstrip()
+            short = prev.right < right - 0.18 * width
+            new = (_starts_item(text, current[0].text.lstrip())
+                   or gap > 1.3 * size + 4.0
+                   or (line.size and prev.size and abs(line.size - prev.size) > 1.2)
+                   or (line.x - left > 6.0 and short)
+                   or (short and line.x - prev.x > 6.0)
+                   or _would_fit(prev, line, right))
+            if new:
+                paragraphs.append(Paragraph(lines=current))
+                current = []
+        current.append(line)
+    if current:
+        paragraphs.append(Paragraph(lines=current))
+    return paragraphs
+
+
+def _continues_paragraph(previous, paragraph: Paragraph, right: float) -> bool:
+    """La regione successiva continua il paragrafo precedente (stessa colonna, a capo).
+
+    Serve quando il modello separa le righe di uno stesso paragrafo: stesso corpo,
+    stesso margine sinistro (niente rientro di prima riga), interlinea normale e
+    riga precedente piena fino in fondo.
+    """
+    if not isinstance(previous, Paragraph):
+        return False
+    if not previous.lines or not paragraph.lines:
+        return False
+    last, first = previous.lines[-1], paragraph.lines[0]
+    size = max(last.size, first.size, 1.0)
+    if abs(last.size - first.size) > 0.6 or abs(first.x - previous.x) > 3.0:
+        return False
+    if is_bullet(first.text.lstrip()) or _ORDERED_RE.match(first.text.lstrip()):
+        return False
+    gap = last.y - first.top
+    if gap < -1.0 or gap > 0.8 * size:
+        return False
+    widest = max(previous.right, paragraph.right, right) - previous.x
+    if last.right - previous.x < 0.8 * widest:
+        return False
+    return not _would_fit(last, first, max(previous.right, paragraph.right))
+
+
+def _region_columns(regions, text_left: float, text_right: float) -> list[tuple[float, float]]:
+    """Colonna (sinistra, destra) di ogni regione, per rientri e allineamento.
+
+    La colonna è la regione di testo più larga che contiene in orizzontale la
+    regione (un titolo "1 Introduction" sta nella colonna sinistra); una regione
+    larga quasi quanto la pagina, o che non sta in nessuna colonna, usa i margini
+    della pagina (così i titoli centrati restano centrati).
+    """
+    page_width = max(text_right - text_left, 1.0)
+    columns = []
+    for region in regions:
+        best = None
+        for other in regions:
+            if other.kind not in _AI_PROSE or other.x1 - other.x0 > 0.65 * page_width:
+                continue
+            if other.x0 - 6 <= region.x0 and region.x1 <= other.x1 + 6:
+                if best is None or other.x1 - other.x0 > best[1] - best[0]:
+                    best = (other.x0, other.x1)
+        columns.append(best or (text_left, text_right))
+    return columns
+
+
+def _ai_page_blocks(page: dict, lines: list[Line], ruled: list[Table],
+                    ruled_lines: list[set[int]], layout_pages,
+                    text_left: float, text_right: float) -> list:
+    """Blocchi di una pagina, nell'ordine di lettura del modello AI.
+
+    Ogni riga di testo va alla regione che la contiene; le righe che non cadono
+    in nessuna regione NON si perdono: diventano paragrafi euristici inseriti
+    vicino alla regione che le precede. Così il modello può solo migliorare
+    l'ordine e la struttura, mai togliere testo.
+    """
+    regions = _merge_formula_numbers(
+        [region for region in page["regions"] if region.kind not in _AI_IGNORED])
+    regions.sort(key=lambda region: region.order)
+
+    used_by_ruled: set[int] = set()
+    region_ruled: dict[int, Table] = {}
+    leftovers: list = []
+    for table, members in zip(ruled, ruled_lines, strict=True):
+        target = next((i for i, region in enumerate(regions)
+                       if region.kind == "table" and _center_in(table, region)), None)
+        if target is not None and target not in region_ruled:
+            region_ruled[target] = table
+            used_by_ruled |= members
+        elif not any(_center_in(table, region) for region in regions):
+            leftovers.append(table)          # griglia disegnata fuori da ogni regione
+            used_by_ruled |= members
+        # una griglia dentro una regione di testo è una cornice: vale il testo
+
+    members: list[list[Line]] = [[] for _ in regions]
+    free: list[Line] = []
+    for index, line in enumerate(lines):
+        if index in used_by_ruled or not line.text.strip():
+            continue
+        target = _best_region(line.x, line.y, line.right, line.top, regions)
+        if target is None:
+            free.append(line)
+        else:
+            members[target].append(line)
+
+    # I riquadri del modello sono larghi di qualche punto: per rientri, colonne e
+    # allineamento valgono i bordi VERI del testo che contengono.
+    for region, region_lines in zip(regions, members, strict=True):
+        if region_lines and region.kind not in _AI_FIGURES and region.kind != "table":
+            region.x0 = min(line.x for line in region_lines)
+            region.x1 = max(line.right for line in region_lines)
+
+    region_images: list[list[ImageBlock]] = [[] for _ in regions]
+    for image in page["images"]:
+        target = next((i for i, region in enumerate(regions)
+                       if region.kind in _AI_FIGURES and _center_in(image, region)), None)
+        if target is None:
+            leftovers.append(image)
+        else:
+            region_images[target].append(image)
+
+    gutters = _column_gutters(lines)
+    columns = _region_columns(regions, text_left, text_right)
+    placed: list[tuple[float, object]] = []   # (posizione, blocco)
+    last_prose: list = [None]                 # ultimo paragrafo uscito da una regione di testo
+
+    def place(position: float, block, column: tuple[float, float] | None = None) -> None:
+        if isinstance(block, Paragraph):
+            left, right = column or _column_bounds(block, gutters, text_left, text_right)
+            block.align = _detect_align(block, left, right)
+            block.indent_pt = max(0.0, block.x - left)
+        placed.append((position, block))
+
+    def prose(position: int | float, region_lines: list[Line], role: str) -> None:
+        column = columns[int(position)]
+        region = regions[int(position)]
+        paragraphs = _region_paragraphs(region_lines, region.x0, region.x1)
+        previous = placed[-1][1] if placed else None
+        if (paragraphs and previous is not None and previous is last_prose[0]
+                and _continues_paragraph(previous, paragraphs[0], column[1])):
+            # Il modello a volte vede ogni riga di un paragrafo come una regione.
+            previous.lines.extend(paragraphs.pop(0).lines)
+            if role == "body":
+                previous.role = "body"
+        for paragraph in paragraphs:
+            if role == "body" and (len(paragraphs) > 1 or len(paragraph.lines) > 1):
+                paragraph.role = "body"
+            place(position, paragraph, column)
+            if len(paragraph.lines) > 1:
+                # Allineamento misurato sulla regione: un abstract giustificato più
+                # stretto della pagina, misurato sui margini, risultava "centrato".
+                paragraph.align = _detect_align(paragraph, region.x0, max(
+                    line.right for line in region_lines))
+        last_prose[0] = placed[-1][1] if placed else None
+
+    for index, region in enumerate(regions):
+        region_lines = members[index]
+        text_chars = sum(len(line.text.strip()) for line in region_lines)
+        if region.kind in _AI_FIGURES and (region.kind == "display_formula"
+                                           or region_images[index]
+                                           or text_chars <= _FIGURE_MAX_TEXT):
+            figure = _figure_block(region, region_lines, region_images[index],
+                                   layout_pages, page["index"])
+            if figure is not None:
+                place(index, figure)
+                for image in region_images[index]:
+                    if image is not figure and not (region.overlap(
+                            image.x, image.y, image.right, image.top)
+                            >= 0.9 * max(1.0, image.width_pt * image.height_pt)):
+                        place(index + 0.1, image)   # foto solo in parte nella regione
+                continue
+            for image in region_images[index]:
+                place(index, image)
+            prose(index, region_lines, "")
+            continue
+        for image in region_images[index]:
+            place(index, image)
+        if not region_lines and index not in region_ruled:
+            continue
+        if region.kind == "table":
+            table = region_ruled.get(index) or _table_from_region_lines(
+                region_lines, _segments_inside(page["segments"], region))
+            if table is not None:
+                place(index, table)
+                if index in region_ruled and region_lines:
+                    prose(index + 0.1, region_lines, "")   # testo fuori dalla griglia
+                continue
+            prose(index, region_lines, "")
+            continue
+        if region.kind in _AI_TITLES:
+            ordered = _merge_fragments(sorted(region_lines, key=lambda ln: (-ln.y, ln.x)))
+            text = " ".join(line.text.strip() for line in ordered)
+            if len(ordered) <= 4 and len(text) <= 250:
+                heading = Paragraph(lines=_join_baselines(ordered),
+                                    role="title" if region.kind == "doc_title" else "heading")
+                place(index, heading, columns[index])
+                continue
+            prose(index, region_lines, "")
+            continue
+        if region.kind == "number" and all(_PAGE_NUMBER_RE.match(line.text.strip())
+                                           for line in region_lines):
+            continue      # numero di pagina: Word numera da sé, nel testo è rumore
+        prose(index, region_lines, "body" if region.kind in _AI_PROSE else "")
+
+    # Testo e oggetti fuori da ogni regione: accanto alla regione più vicina sopra.
+    if free:
+        leftovers.extend(_paragraphs_from_lines(_xy_cut(free)))
+    page_area = max(1.0, page["width"] * page["height"])
+    for block in leftovers:
+        top = block.top
+        x0 = block.x
+        x1 = block.right
+        if (isinstance(block, ImageBlock)
+                and block.width_pt * block.height_pt >= 0.6 * page_area):
+            # Sfondo a tutta pagina: in un flusso di testo va dopo il contenuto,
+            # non prima (spingeva tutto il testo alla pagina successiva).
+            place(len(regions) + 1.0, block)
+            continue
+        anchor = -0.5
+        for index, region in enumerate(regions):
+            above = region.y1 >= top - 1.0
+            beside = region.x0 <= x1 and x0 <= region.x1
+            if above and beside:
+                anchor = max(anchor, index + 0.5)
+        place(anchor, block)
+
+    placed.sort(key=lambda item: item[0])
+    return [block for _position, block in placed]
+
+
 def _classify_headings(document: Document) -> None:
     """Titoli: gerarchia per corpo (i corpi più grandi = livelli più alti).
 
@@ -1568,9 +2116,15 @@ def _classify_headings(document: Document) -> None:
     size_rank = {size: index + 1 for index, size in enumerate(heading_sizes)}
 
     for block in document.blocks:
-        if not isinstance(block, Paragraph):
+        if not isinstance(block, Paragraph) or block.role == "body":
             continue
         level = _heading_level(block, body_size, size_rank)
+        if level is None and block.role in ("heading", "title"):
+            # Il modello AI l'ha visto come titolo anche se il corpo non lo dice
+            # ("Abstract" in corpo normale): livello più basso fra quelli presenti.
+            numbered = _NUMBERED_RE.match(block.text.strip())
+            level = (min(numbered.group(1).count(".") + 1, 6) if numbered
+                     else size_rank.get(round(block.size, 1), min(len(size_rank) + 1, 6)))
         if level is None:
             continue
         block.style = "heading"
@@ -1580,7 +2134,8 @@ def _classify_headings(document: Document) -> None:
     for block in document.blocks:
         if isinstance(block, PageBreak):
             break
-        if isinstance(block, Paragraph) and block.style == "heading" and block.size >= body_size * 1.45:
+        if isinstance(block, Paragraph) and block.style == "heading" and (
+                block.size >= body_size * 1.45 or block.role == "title"):
             block.style = "title"
             block.level = 1
             document.title = block.text

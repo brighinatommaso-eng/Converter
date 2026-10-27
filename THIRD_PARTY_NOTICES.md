@@ -28,6 +28,22 @@ differ slightly.
 | trimesh | MIT | 3D mesh conversions |
 | markdown-it-py | MIT | Markdown reader of the markup engine (CommonMark/GFM) |
 | mdurl | MIT | required by markdown-it-py |
+| onnxruntime | MIT | runs the AI layout model on the CPU (PDF reading) |
+| pypdfium2 / PDFium | Apache-2.0 or BSD-3-Clause / BSD-3-Clause (parts Apache-2.0) | renders PDF pages for the layout model |
+
+## AI layout model
+
+| | |
+|---|---|
+| **Model** | PP-DocLayoutV2 by PaddlePaddle (layout detection with reading order) |
+| **License** | **Apache-2.0** — text shipped as `licenses/Apache-2.0.txt` |
+| **ONNX export used** | RapidAI/RapidLayout v1.2.0 (`pp_doc_layoutv2.onnx`, SHA-256 `0bd2ea0997fe0789f0300292291f8bbf897d890b44a9a3bd5be72afd6198aa90`) |
+| **Upstream** | <https://github.com/PaddlePaddle/PaddleOCR> · <https://github.com/RapidAI/RapidLayout> |
+| **Where** | `_internal/models/pp_doc_layoutv2.onnx` |
+
+The model only locates blocks (titles, paragraphs, tables, figures…) on a rendered
+page and orders them; the text itself is always read from the PDF. It runs offline,
+nothing is sent anywhere.
 
 ## Bundled command-line tools (separate executables)
 
@@ -43,11 +59,11 @@ a GPL tool whose license text is missing).
 
 | | |
 |---|---|
-| **Version** | 8.1.1 — "full build" |
-| **Build/vendor** | www.gyan.dev (`ffmpeg version 8.1.1-full_build-www.gyan.dev`) |
+| **Version** | the current gyan.dev release, "essentials build" on Windows (the exact version is printed by the release workflow) |
+| **Build/vendor** | Windows: www.gyan.dev essentials · Linux AppImage: BtbN FFmpeg-Builds (GPL) |
 | **License** | **GPL-3.0** — this build is configured with `--enable-gpl --enable-version3` |
 | **Official project site** | <https://ffmpeg.org/> |
-| **Source code** | <https://ffmpeg.org/download.html> · this version: <https://github.com/FFmpeg/FFmpeg/tree/n8.1.1> |
+| **Source code** | <https://ffmpeg.org/download.html> · <https://github.com/FFmpeg/FFmpeg> |
 | **Binary build page** | <https://www.gyan.dev/ffmpeg/builds/> |
 | **License texts shipped** | `licenses/ffmpeg-GPLv3.txt`, `licenses/ffmpeg-LGPLv2.1.txt` |
 

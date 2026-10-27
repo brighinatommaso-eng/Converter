@@ -47,8 +47,13 @@ Notes:
 - 3MF is **input-only**; multi-object 3D scenes are merged into a single mesh when
   the target is stl/obj/ply (reported as lossy).
 - Document conversion is best effort, not pixel-faithful. PDF imports are rebuilt
-  from the page geometry (headings, paragraphs, lists, tables) with pdfminer.six;
-  the DOCX output can keep the editable structure or reproduce the printed layout.
+  by a **local AI layout model** (PP-DocLayoutV2, runs offline on the CPU, about
+  1–2 s per page): it finds titles, paragraphs, tables, figures and formulas on the
+  rendered page and the reading order of multi-column layouts. The words always come
+  from the PDF itself (pdfminer.six), never from the model. Charts and formulas
+  become images. The DOCX output can keep the editable structure or reproduce the
+  printed layout. If the model is missing, the page geometry alone is used and the
+  badge says so.
 - Markdown, HTML, EPUB and plain text are converted by a built-in engine (no pandoc,
   no LibreOffice needed): headings, emphasis, lists, tables, links, code and local
   images become native Word/OpenDocument/RTF/EPUB structure. Remote images are
@@ -120,7 +125,10 @@ To install the external tools:
 
 > **PDF → DOCX / ODT / RTF / MD / TXT / HTML is rebuilt in-process.**
 > The structured document engine uses **pdfminer.six** and **python-docx** (both
-> MIT), so no AGPL PDF library is required. PDF → DOCX/MD/TXT/HTML works in both
+> MIT), so no AGPL PDF library is required. Page layout is analysed by the
+> PP-DocLayoutV2 model (Apache-2.0) through **onnxruntime** (MIT) and **pypdfium2**;
+> when running from source, `python installer/fetch_layout_model.py` downloads the
+> model (214 MB, hash-checked) into `models/`. PDF → DOCX/MD/TXT/HTML works in both
 > modes; ODT and RTF also need LibreOffice for the final docx → odt/rtf step.
 
 ## Run from source

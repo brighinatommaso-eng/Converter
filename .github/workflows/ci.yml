@@ -46,6 +46,14 @@ jobs:
             ffmpeg libreoffice-writer fonts-dejavu-core fonts-crosextra-carlito \
             libegl1 libgl1 libxkbcommon0 libxkbcommon-x11-0 libfontconfig1 libdbus-1-3
       - run: pip install -r requirements.txt "pytest>=8.0" "ruff>=0.6" "lxml>=5"
+      # Il modello AI di layout (214 MB, hash fisso) fa girare anche i test
+      # end-to-end di tests/test_layout_ai.py; in cache dopo il primo download.
+      - uses: actions/cache@v4
+        with:
+          path: models
+          key: layout-model-0bd2ea0997fe0789
+      - name: AI layout model
+        run: python installer/fetch_layout_model.py
       - name: Tests
         env:
           QT_QPA_PLATFORM: offscreen

@@ -68,13 +68,27 @@ def _safe_href(url: str) -> str:
     return url if scheme in _SAFE_SCHEMES else ""
 
 
+def _readable_color(color: str) -> str:
+    """Il colore del testo, o "" se è quasi bianco.
+
+    Nel PDF il testo chiaro sta sopra una foto o un riquadro scuro; nel file
+    scritto lo sfondo non sta dietro al testo (è un'immagine a parte, o non c'è),
+    e il testo bianco diventava invisibile sulla pagina bianca.
+    """
+    if not color or not _COLOR_RE.match(color):
+        return ""
+    r, g, b = (int(color[i:i + 2], 16) for i in (1, 3, 5))
+    luminance = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255
+    return "" if luminance > 0.85 else color
+
+
 def _run_style(run: Run) -> str:
     parts = []
     if run.font:
         parts.append(f"font-family:{_css_string(run.font)}")
     if run.size:
         parts.append(f"font-size:{run.size:g}pt")
-    if run.color and _COLOR_RE.match(run.color):
+    if _readable_color(run.color):
         parts.append(f"color:{run.color}")
     return ";".join(parts)
 
@@ -553,7 +567,7 @@ def _set_run(docx_run, run: Run) -> None:
         docx_run.font.italic = True
     if run.underline:
         docx_run.font.underline = True
-    if run.color:
+    if _readable_color(run.color):
         try:
             docx_run.font.color.rgb = RGBColor.from_string(run.color.lstrip("#").upper())
         except ValueError:

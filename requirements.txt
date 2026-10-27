@@ -14,6 +14,11 @@ python-docx>=1.1      # read/write DOCX for the structured engine (MIT; lxml com
 striprtf>=0.0.26      # rtf→txt (pure-Python, MIT) — works in Portable
 trimesh>=4.0          # 3D mesh conversions (pure-Python, MIT; hard dep numpy comes with pandas)
 markdown-it-py>=3.0   # Markdown reader of the markup engine (CommonMark/GFM, pure-Python, MIT)
+onnxruntime>=1.17     # runs the local AI layout model for PDF reading (MIT, CPU only)
+pypdfium2>=4.20       # renders PDF pages for the layout model (Apache-2.0/BSD-3, PDFium)
+# The layout model itself (PP-DocLayoutV2, Apache-2.0, ~214 MB) is not on PyPI:
+# the release build downloads it into models/ (see .github/workflows/build.yml).
+# Without it PDF reading falls back to the geometric engine and says so.
 
 # --- Optional features (install only if you need them) ---
 # OCR of scanned PDFs (Full mode). ocrmypdf is MPL-2.0 and also needs the external

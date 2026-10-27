@@ -58,7 +58,9 @@ def _probe_first_pages(src: Path) -> tuple[int, bool]:
 
     _, interpreter_class = _tolerant_classes()
     manager = PDFResourceManager(caching=True)
-    device = PDFPageAggregator(manager, laparams=LAParams())
+    # all_texts: il testo dentro i Form XObject (report impaginati, moduli) conta
+    # come testo; senza, un PDF digitale così sembrava una scansione.
+    device = PDFPageAggregator(manager, laparams=LAParams(all_texts=True))
     interpreter = interpreter_class(manager, device)
     chars = 0
     images = False

@@ -91,7 +91,7 @@ God nodes (most-connected core abstractions): `ConversionJob`, `MainWindow`, `re
 | `markup.py` | in-process markup engine (`markupdoc/`: markdown-it-py, stdlib HTML parser, odfpy, python-docx) — replaced pandoc on 2026-10-27 | markup/document interchange | md/html/epub/txt → md/html/epub/txt/rtf/docx/odt and odt → md/txt; priority 12; sanitized HTML tree as the intermediate model; images never downloaded; docx/odt→**html** is NOT claimed here (see §19), so it routes to LibreOffice. |
 | `pdf.py` | pdfminer.six (pure-Python, MIT) | pdf→txt / pdf→html fallback | works in Portable; priority 10, so the structured engine normally wins those pairs. |
 | `textdoc.py` | pdfminer.six + python-docx (both MIT, in-process) | pdf→docx/odt/rtf/md/txt/html; docx→md/txt | structured IR (`docmodel/`); lossy with target-specific reasons; docx/md/txt/html in both modes, odt/rtf need FULL + soffice. See §21. |
-| `docmodel/` | — | IR + readers (`read_pdf`, `read_docx`) + writers (`write_docx`, `write_markdown`, `write_text`, `write_html`) | the single structure model behind `textdoc.py`; documented seam for optional AI refinement. |
+| `docmodel/` | — | IR + readers (`read_pdf`, `read_docx`) + writers (`write_docx`, `write_markdown`, `write_text`, `write_html`) | the single structure model behind `textdoc.py`; PDF pages go through the AI layout model of §27 when it is installed. |
 | `_ocr.py` | OCRmyPDF (external) | scanned-PDF preprocessing | OCR only adds an invisible text layer; the structured reader then runs unchanged. |
 | `rtf.py` | striprtf (pure-Python, MIT) | rtf→txt | works in Portable. |
 | `mesh3d.py` | trimesh (pure-Python, MIT; numpy) | obj/stl/ply/glb/gltf/3mf → obj/stl/ply/glb/gltf | in-process (Portable-friendly); 3mf input-only, gated on optional lxml; glb↔gltf lossless, →stl/obj lossy, multi-object→single-mesh downgraded to lossy at runtime (see §24). |
@@ -794,3 +794,62 @@ in-process like `image.py`, so it works in both Full and Portable — no externa
 - **Proof:** `ruff check .` clean; full suite `428 passed, 20 xfailed` with the local
   corpus (2026-10-25; the xfails are corrupt/encrypted corpus files, not the empty
   corpus). The Windows exe was rebuilt on 2026-10-25 (see §18).
+
+## 27. AI layout analysis for PDF reading (2026-10-27)
+
+**Why.** Testing PDF → Word by hand showed the geometric engine's limits:
+- two-column papers mixed their columns;
+- borderless tables became loose text;
+- vector charts vanished (only the axis numbers stayed, as stray text);
+- infographics came out in the wrong order.
+
+**What.** `docmodel/layout_ai.py` runs **PP-DocLayoutV2** (PaddlePaddle, Apache-2.0;
+ONNX export by RapidAI, 214 MB, SHA-256 pinned) through **onnxruntime** (MIT) on
+each page rendered by **pypdfium2/PDFium**. The model returns regions (25 labels:
+`doc_title`, `paragraph_title`, `text`, `table`, `image`, `chart`,
+`display_formula`, `header`, `footer`, `number`…) in reading order.
+`pdfreader._ai_page_blocks` then builds the page:
+- every pdfminer line goes to the region that contains it;
+- text regions become paragraphs (`_region_paragraphs`: justified lines that pdfminer
+  split are joined back, and a line break where the next word would have fitted is
+  kept, per `_would_fit`);
+- title regions become headings (`Paragraph.role`);
+- table regions become tables (`_table_from_region_lines`, with multi-line cells and
+  merged row labels);
+- figure, chart and formula regions become crops of the rendered page, so vector
+  graphics survive;
+- page numbers are dropped.
+
+Lines outside every region are **kept** next to the preceding region: the model can
+reorder and structure, never remove text.
+
+**Fallback.** Without the model (or onnxruntime/pypdfium2), the page goes through the
+geometric engine, and so does a rotated page or a page the model cannot analyse. The
+verdict says how many pages were affected and why (`Document.ai_pages`,
+`heuristic_pages`, `ai_unavailable`). `CONVERTER_LAYOUT_AI=0` turns the model off.
+Tests do that by default (`conftest.py`), except those marked `layout_ai`.
+
+**Text-loss bug found on the way.** Without `LAParams(all_texts=True)`, pdfminer does not
+group text that sits inside Form XObjects. That covers InDesign layouts, reports and
+filled forms. The reader skipped that text silently, in both engines:
+
+| PDF | words kept before | after |
+|---|---|---|
+| negative-coords | 4.6 % | 96 % |
+| reliance | 2.9 % | 83 % |
+| figure-overlay | 50 % | 100 % |
+
+Across the 9 corpus baselines that changed, no word was lost and 1,900+ were recovered.
+The OCR gate had the same blind spot: a PDF whose text is all in XObjects looked like a
+scan.
+
+**Concurrency.** PDFium is not thread-safe, so every pypdfium2 call goes through one lock
+(the GUI converts in parallel). onnxruntime sessions are shared.
+
+**Packaging.** `installer/fetch_layout_model.py` downloads and checks the model; CI
+caches it. The spec bundles it as `_internal/models/pp_doc_layoutv2.onnx`, and
+`CONVERTER_REQUIRE_LAYOUT_MODEL=1` makes a missing model fail the release build. The
+frozen `--selftest` checks `pdf layout AI model loads` and `pdf layout AI analyses a
+page`. Cost: +241 MB installed (model 205, onnxruntime 29, PDFium 7). Measured speed:
+about 1–1.6 s per page on 4 CPU cores.
+
