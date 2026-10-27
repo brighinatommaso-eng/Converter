@@ -107,6 +107,9 @@ def run() -> int:
     app.setApplicationName(APP_NAME)
     app.setOrganizationName(APP_NAME)
     app.setApplicationVersion(__version__)
+    # Linux/Wayland: GNOME e KDE abbinano finestra e icona tramite il file .desktop
+    # (converter.desktop dei pacchetti .deb/AppImage). Su Windows non ha effetto.
+    app.setDesktopFileName("converter")
 
     icon = _app_icon()
     app.setWindowIcon(icon)

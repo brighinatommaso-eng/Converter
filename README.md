@@ -68,11 +68,28 @@ Two downloads, same app:
 > may show a blue "Windows protected your PC" dialog. Click **More info → Run
 > anyway**. (The app is open source; you can also run it from source, below.)
 
-The **SHA256 checksums** of both files are in the release notes and in
+The **SHA256 checksums** of every file are in the release notes and in
 `SHA256SUMS.txt`, attached to every release.
 
 Both include `LICENSE`, `THIRD_PARTY_NOTICES.md` and a `licenses/`
 folder with the third-party license texts (ffmpeg, pandoc).
+
+## Download (Linux)
+
+Two downloads on the same [Releases page](https://github.com/brighinatommaso-eng/Converter/releases):
+
+- **`converter_X.Y.Z_amd64.deb`** (Ubuntu, Debian, Mint, Pop!_OS…): double-click it,
+  or run `sudo apt install ./converter_X.Y.Z_amd64.deb`. Converter appears in the
+  application menu; ffmpeg and pandoc come from your distribution and are installed
+  with it. Remove it with `sudo apt remove converter`.
+- **`Converter-vX.Y.Z-x86_64.AppImage`** (any recent distro: Fedora, Arch, openSUSE…):
+  one file with everything inside. Make it executable and run it:
+  `chmod +x Converter-*.AppImage && ./Converter-*.AppImage`. It needs glibc 2.35 or
+  newer (Ubuntu 22.04, Debian 12, Fedora 36 and later); some distros need
+  `libfuse2` to open AppImages (or run it with `--appimage-extract-and-run`).
+
+Settings and history are kept in `~/.config/Converter`. For the Full mode (faithful
+Office conversions) install LibreOffice from your distribution.
 
 ## External tools
 

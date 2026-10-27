@@ -1,0 +1,4 @@
+#!/bin/sh
+# Punto d'ingresso dell'AppImage: lancia l'eseguibile PyInstaller dentro l'AppDir.
+HERE="$(dirname "$(readlink -f "$0")")"
+exec "$HERE/usr/lib/converter/Converter" "$@"

@@ -1,0 +1,427 @@
+# Build dei pacchetti: Windows (zip + setup.exe) e Linux (AppImage + .deb).
+#
+# - Su un tag v*      → il job "release" crea una release in BOZZA con tutti i file
+#                       e un solo SHA256SUMS.txt. La pubblica una persona.
+# - Su PR che toccano il packaging, o a mano → stesse build e stessi controlli; i
+#   file finiscono negli artifact del run e "release" prepara le note senza pubblicare.
+#
+# Nessuna release se: la versione del tag non coincide col codice, un selftest
+# fallisce, un pacchetto non si installa/avvia/disinstalla pulito.
+name: Build
+
+on:
+  push:
+    tags: ["v*"]
+  pull_request:
+    paths:
+      - converter.spec
+      - converter_app.py
+      - converter/gui/app.py
+      - requirements.txt
+      - version_info.txt
+      - installer/**
+      - licenses/**
+      - docs/releases/**
+      - .github/workflows/build.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Version check
+        id: version
+        run: |
+          $v = python -c "import converter; print(converter.__version__)"
+          if ($LASTEXITCODE -ne 0 -or -not $v) { throw "versione non leggibile da converter/__init__.py" }
+          $v = $v.Trim()
+          if ($env:GITHUB_REF_TYPE -eq "tag" -and $env:GITHUB_REF_NAME -ne "v$v") {
+            throw "Il tag $env:GITHUB_REF_NAME non coincide con __version__ = $v"
+          }
+          # L'exe mostra version_info.txt in Proprietà → Dettagli: deve dire lo stesso.
+          if (-not (Select-String -Path version_info.txt -SimpleMatch "'$v.0'" -Quiet)) {
+            throw "version_info.txt non riporta la versione $v.0"
+          }
+          "version=$v" >> $env:GITHUB_OUTPUT
+          Write-Host "Converter $v"
+
+      - name: Python dependencies
+        run: pip install -r requirements.txt "pyinstaller>=6.10"
+
+      # Un passo per tool, ognuno con timeout: un download appeso (è successo: 35 min
+      # fermi senza log) fallisce in fretta e il nome del passo dice quale.
+      - name: ffmpeg
+        timeout-minutes: 15
+        run: |
+          $ProgressPreference = "SilentlyContinue"   # la barra di progresso rallenta i download
+          $tools = Join-Path $env:RUNNER_TEMP "tools"
+          New-Item -ItemType Directory -Force $tools | Out-Null
+          # Build "full-shared" di gyan.dev: stessi codec della "full" di winget
+          # Gyan.FFmpeg, ma ffmpeg.exe e ffprobe.exe condividono le DLL invece di
+          # contenerle due volte (~200 MB in meno). L'hash pubblicato viene verificato.
+          $base = "https://www.gyan.dev/ffmpeg/builds"
+          $archive = Join-Path $tools "ffmpeg.7z"
+          for ($i = 1; $i -le 3; $i++) {
+            try {
+              Invoke-WebRequest "$base/ffmpeg-release-full-shared.7z" -OutFile $archive -TimeoutSec 240
+              $expected = (Invoke-WebRequest "$base/ffmpeg-release-full-shared.7z.sha256" -TimeoutSec 60).Content.Trim().Split()[0]
+              break
+            } catch {
+              Write-Host "tentativo $i fallito: $_"
+              if ($i -eq 3) { throw }
+              Start-Sleep (10 * $i)
+            }
+          }
+          $actual = (Get-FileHash $archive -Algorithm SHA256).Hash
+          if ($actual -ne $expected.ToUpper()) { throw "SHA256 di ffmpeg non corrisponde ($actual != $expected)" }
+          7z x $archive "-o$tools\ffmpeg" -y | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "estrazione di ffmpeg fallita" }
+          $ffbin = (Get-ChildItem "$tools\ffmpeg" -Recurse -Filter ffmpeg.exe | Select-Object -First 1).DirectoryName
+          if (-not $ffbin) { throw "ffmpeg.exe non trovato nell'archivio" }
+          $ffbin >> $env:GITHUB_PATH
+
+      - name: pandoc
+        timeout-minutes: 10
+        run: |
+          $tools = Join-Path $env:RUNNER_TEMP "tools"
+          New-Item -ItemType Directory -Force $tools | Out-Null
+          # Ultima release ufficiale (jgm/pandoc), zip x86_64.
+          gh release download --repo jgm/pandoc --pattern "pandoc-*-windows-x86_64.zip" --dir $tools --clobber
+          if ($LASTEXITCODE -ne 0) { throw "download di pandoc fallito" }
+          $pzip = Get-ChildItem $tools -Filter "pandoc-*-windows-x86_64.zip" | Select-Object -First 1
+          Expand-Archive $pzip.FullName -DestinationPath "$tools\pandoc" -Force
+          $pbin = (Get-ChildItem "$tools\pandoc" -Recurse -Filter pandoc.exe | Select-Object -First 1).DirectoryName
+          if (-not $pbin) { throw "pandoc.exe non trovato nello zip" }
+          $pbin >> $env:GITHUB_PATH
+
+      - name: Inno Setup
+        timeout-minutes: 10
+        run: |
+          choco install innosetup -y --no-progress
+          if ($LASTEXITCODE -ne 0) { throw "choco install innosetup fallito" }
+
+      # LibreOffice NON va nel bundle: serve solo perché il selftest copra anche le
+      # conversioni della modalità FULL. È best-effort: il suo MSI (~360 MB) arriva da
+      # un mirror di documentfoundation.org che a volte va a 170 KB/s (35 min). Senza,
+      # il selftest segna SKIP quei controlli e il passo dopo lo dichiara con un warning.
+      - name: LibreOffice (best-effort)
+        timeout-minutes: 15
+        continue-on-error: true
+        run: |
+          choco install libreoffice-fresh -y --no-progress
+          if ($LASTEXITCODE -ne 0) { throw "choco install libreoffice-fresh fallito" }
+
+      - name: Tool versions
+        run: |
+          ffmpeg -hide_banner -version | Select-Object -First 1
+          pandoc --version | Select-Object -First 1
+          $so = Get-Item "C:\Program Files\LibreOffice\program\soffice.exe" -ErrorAction SilentlyContinue
+          if ($so) { "LibreOffice " + $so.VersionInfo.ProductVersion }
+          else { "::warning::LibreOffice non installato: il selftest salta i controlli della modalità FULL" }
+          exit 0   # pipe chiusa da Select-Object: il codice d'uscita di pandoc qui non conta
+
+      - name: PyInstaller
+        run: |
+          pyinstaller converter.spec --noconfirm --clean
+          if ($LASTEXITCODE -ne 0) { throw "pyinstaller fallito" }
+          if (Test-Path dist\Converter\_internal\torch) { throw "torch nel bundle: errore di packaging" }
+          $mb = [math]::Round(((Get-ChildItem dist\Converter -Recurse -File | Measure-Object Length -Sum).Sum / 1MB), 0)
+          Write-Host "Bundle: $mb MB"
+          Get-ChildItem dist\Converter -Recurse -File | Sort-Object Length -Descending |
+            Select-Object -First 15 | ForEach-Object { "{0,8:N1} MB  {1}" -f ($_.Length / 1MB), $_.FullName.Substring((Resolve-Path dist\Converter).Path.Length + 1) }
+          if ($mb -gt 1500) { throw "Bundle di $mb MB: troppo grande, probabile errore di packaging" }
+
+      - name: Selftest (bundle)
+        run: |
+          $report = Join-Path $env:RUNNER_TEMP "selftest-bundle.txt"
+          $p = Start-Process dist\Converter\Converter.exe -ArgumentList "--selftest", "`"$report`"" -Wait -PassThru
+          Get-Content $report
+          if ($p.ExitCode -ne 0 -or -not (Select-String -Path $report -Pattern "SELFTEST PASS" -SimpleMatch -Quiet)) {
+            throw "selftest dell'exe fallito"
+          }
+
+      - name: Zip portable
+        run: |
+          $v = "${{ steps.version.outputs.version }}"
+          Compress-Archive -Path dist\Converter -DestinationPath "dist\Converter-v$v-windows.zip" -CompressionLevel Optimal
+
+      - name: Installer
+        run: |
+          $v = "${{ steps.version.outputs.version }}"
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DAppVersion=$v" installer\converter.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC fallito" }
+
+      - name: Installer round-trip (install, selftest, uninstall)
+        run: |
+          $v = "${{ steps.version.outputs.version }}"
+          $dir = Join-Path $env:RUNNER_TEMP "ConverterInstalled"
+          $setup = Start-Process "dist\Converter-v$v-setup.exe" -Wait -PassThru `
+            -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CURRENTUSER", "/DIR=`"$dir`""
+          if ($setup.ExitCode -ne 0) { throw "setup.exe uscito con $($setup.ExitCode)" }
+          $lnk = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\Converter.lnk"
+          if (-not (Test-Path $lnk)) { throw "collegamento nel menu Start mancante" }
+
+          $report = Join-Path $env:RUNNER_TEMP "selftest-installed.txt"
+          $p = Start-Process "$dir\Converter.exe" -ArgumentList "--selftest", "`"$report`"" -Wait -PassThru
+          Get-Content $report
+          if ($p.ExitCode -ne 0 -or -not (Select-String -Path $report -Pattern "SELFTEST PASS" -SimpleMatch -Quiet)) {
+            throw "selftest della copia installata fallito"
+          }
+
+          $u = Start-Process "$dir\unins000.exe" -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART" -Wait -PassThru
+          if ($u.ExitCode -ne 0) { throw "disinstallazione uscita con $($u.ExitCode)" }
+          # unins000.exe si rilancia da una copia temporanea: aspetta che finisca davvero.
+          for ($i = 0; $i -lt 30 -and (Test-Path "$dir\Converter.exe"); $i++) { Start-Sleep 1 }
+          if (Test-Path "$dir\Converter.exe") { throw "la disinstallazione ha lasciato Converter.exe" }
+          if (Test-Path $lnk) { throw "la disinstallazione ha lasciato il collegamento" }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Converter-windows
+          path: |
+            dist/Converter-v*-windows.zip
+            dist/Converter-v*-setup.exe
+          retention-days: 14
+          if-no-files-found: error
+
+  linux:
+    # 22.04 e non "latest": l'AppImage gira solo dove la glibc è almeno quella della
+    # macchina di build (2.35 → Ubuntu 22.04, Debian 12, Fedora 36 e successive).
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    env:
+      GH_TOKEN: ${{ github.token }}
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Version check
+        id: version
+        run: |
+          v="$(python -c 'import converter; print(converter.__version__)')"
+          if [ "$GITHUB_REF_TYPE" = tag ] && [ "$GITHUB_REF_NAME" != "v$v" ]; then
+            echo "::error::Il tag $GITHUB_REF_NAME non coincide con __version__ = $v"; exit 1
+          fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "Converter $v"
+
+      # Le librerie di sistema che Qt (xcb/EGL/fontconfig) cerca: presenti qui al
+      # build, PyInstaller raccoglie quelle che non sono "di sistema".
+      - name: System libraries
+        timeout-minutes: 10
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends \
+            libegl1 libgl1 libxkbcommon0 libxkbcommon-x11-0 libxcb-cursor0 libxcb-icccm4 \
+            libxcb-image0 libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-shape0 \
+            libxcb-xinerama0 libxcb-xkb1 libfontconfig1 libdbus-1-3 desktop-file-utils file
+
+      - name: Python dependencies
+        run: pip install -r requirements.txt "pyinstaller>=6.10"
+
+      # ffmpeg/ffprobe/pandoc STATICI per l'AppImage (il .deb usa quelli del sistema).
+      - name: Static ffmpeg and pandoc
+        timeout-minutes: 15
+        run: |
+          tools="$RUNNER_TEMP/tools"; mkdir -p "$tools/bin"
+          # BtbN: build GPL statiche ufficiali; la release "latest" tiene le ultime
+          # versioni stabili nX.Y (esclusa "master" e le varianti -shared).
+          gh release download latest --repo BtbN/FFmpeg-Builds \
+            --pattern 'ffmpeg-n*-latest-linux64-gpl-[0-9]*.tar.xz' --dir "$tools"
+          archive="$(find "$tools" -maxdepth 1 -name 'ffmpeg-n*-latest-linux64-gpl-*.tar.xz' | sort -V | tail -1)"
+          tar -xJf "$archive" -C "$tools"
+          ffbin="$(dirname "$(find "$tools" -type f -name ffmpeg -path '*/bin/*' | head -1)")"
+          cp "$ffbin/ffmpeg" "$ffbin/ffprobe" "$tools/bin/"
+          gh release download --repo jgm/pandoc --pattern 'pandoc-*-linux-amd64.tar.gz' --dir "$tools"
+          tar -xzf "$(find "$tools" -maxdepth 1 -name 'pandoc-*-linux-amd64.tar.gz' | head -1)" -C "$tools"
+          cp "$(find "$tools" -type f -name pandoc -path '*/bin/*' | head -1)" "$tools/bin/"
+          file "$tools"/bin/*
+          "$tools/bin/ffmpeg" -hide_banner -version | head -1
+          "$tools/bin/pandoc" --version | head -1
+          echo "TOOLS_BIN=$tools/bin" >> "$GITHUB_ENV"
+
+      # Come su Windows: solo perché il selftest copra la modalità FULL, best-effort.
+      - name: LibreOffice (best-effort)
+        timeout-minutes: 15
+        continue-on-error: true
+        run: sudo apt-get install -y -q --no-install-recommends libreoffice-writer
+
+      - name: PyInstaller (AppImage, tools bundled)
+        run: |
+          PATH="$TOOLS_BIN:$PATH" pyinstaller converter.spec --noconfirm --clean \
+            --distpath dist-appimage --workpath build-appimage
+          for t in ffmpeg ffprobe pandoc; do
+            test -x "dist-appimage/Converter/_internal/bin/$t" || { echo "::error::$t non nel bundle"; exit 1; }
+          done
+          du -sh dist-appimage/Converter
+          find dist-appimage/Converter -type f -printf '%s %P\n' | sort -rn | head -15 |
+            awk '{ printf "%8.1f MB  %s\n", $1 / 1048576, $2 }'
+
+      - name: PyInstaller (.deb, system tools)
+        run: |
+          CONVERTER_BUNDLE_TOOLS=0 pyinstaller converter.spec --noconfirm --clean \
+            --distpath dist-deb --workpath build-deb
+          test ! -e dist-deb/Converter/_internal/bin || { echo "::error::tool nel bundle del .deb"; exit 1; }
+          du -sh dist-deb/Converter
+
+      - name: Selftest (bundle)
+        run: |
+          report="$RUNNER_TEMP/selftest-bundle.txt"
+          dist-appimage/Converter/Converter --selftest "$report" || true
+          cat "$report"
+          grep -q "SELFTEST PASS" "$report"
+
+      - name: AppImage
+        timeout-minutes: 15
+        run: |
+          gh release download continuous --repo AppImage/appimagetool \
+            --pattern 'appimagetool-x86_64.AppImage' --dir "$RUNNER_TEMP" --clobber
+          chmod +x "$RUNNER_TEMP/appimagetool-x86_64.AppImage"
+          desktop-file-validate installer/linux/converter.desktop
+          installer/linux/build-appimage.sh dist-appimage/Converter "${{ steps.version.outputs.version }}" \
+            dist "$RUNNER_TEMP/appimagetool-x86_64.AppImage"
+          ls -la dist
+
+      - name: AppImage selftest (Ubuntu)
+        run: |
+          report="$RUNNER_TEMP/selftest-appimage.txt"
+          image="dist/Converter-v${{ steps.version.outputs.version }}-x86_64.AppImage"
+          APPIMAGE_EXTRACT_AND_RUN=1 "$image" --selftest "$report" || true
+          cat "$report"
+          grep -q "SELFTEST PASS" "$report"
+
+      # Un'altra distro, da zero: le sole librerie installate sono quelle di un
+      # desktop qualunque. Se qui serve altro, va scritto nel README.
+      - name: AppImage selftest (Fedora container)
+        timeout-minutes: 15
+        run: |
+          docker run --rm -e QT_QPA_PLATFORM=offscreen -e APPIMAGE_EXTRACT_AND_RUN=1 \
+            -e IMAGE="Converter-v${{ steps.version.outputs.version }}-x86_64.AppImage" \
+            -v "$PWD/dist:/w:ro" -v "$RUNNER_TEMP:/out" fedora:latest bash -c '
+              dnf install -y -q mesa-libEGL mesa-libGL libxkbcommon-x11 fontconfig dbus-libs \
+                xcb-util-cursor glib2 freetype libX11 libX11-xcb libxcb > /dev/null &&
+              cd /tmp && "/w/$IMAGE" --selftest /out/selftest-fedora.txt; true'
+          cat "$RUNNER_TEMP/selftest-fedora.txt"
+          grep -q "SELFTEST PASS" "$RUNNER_TEMP/selftest-fedora.txt"
+
+      - name: .deb package
+        run: |
+          installer/linux/build-deb.sh dist-deb/Converter "${{ steps.version.outputs.version }}" dist
+          dpkg-deb --info dist/converter_*_amd64.deb
+
+      - name: .deb round-trip (install, selftest, remove)
+        timeout-minutes: 15
+        run: |
+          sudo apt-get install -y -q ./dist/converter_*_amd64.deb
+          test -x /usr/bin/converter
+          desktop-file-validate /usr/share/applications/converter.desktop
+          report="$RUNNER_TEMP/selftest-deb.txt"
+          converter --selftest "$report" || true
+          cat "$report"
+          grep -q "SELFTEST PASS" "$report"
+          sudo apt-get remove -y -q converter
+          test ! -e /opt/converter || { echo "::error::la rimozione ha lasciato /opt/converter"; exit 1; }
+          test ! -e /usr/bin/converter || { echo "::error::la rimozione ha lasciato /usr/bin/converter"; exit 1; }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Converter-linux
+          path: |
+            dist/Converter-v*-x86_64.AppImage
+            dist/converter_*_amd64.deb
+          retention-days: 14
+          if-no-files-found: error
+
+  release:
+    needs: [windows, linux]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # solo per creare la bozza di release sui tag
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      # Un solo SHA256SUMS.txt per tutti i file, e le note da docs/releases/v<x>.md:
+      # una prima riga "# Titolo" diventa il titolo; la sezione degli hash è generata.
+      - name: Checksums and release notes
+        run: |
+          v="$(python3 -c 'import converter; print(converter.__version__)')"
+          files=("Converter-v$v-windows.zip" "Converter-v$v-setup.exe"
+                 "Converter-v$v-x86_64.AppImage" "converter_${v}_amd64.deb")
+          (cd dist && sha256sum "${files[@]}" > SHA256SUMS.txt && cat SHA256SUMS.txt)
+          python3 - "$v" <<'PY'
+          import os, pathlib, sys
+          v = sys.argv[1]
+          notes = pathlib.Path(f"docs/releases/v{v}.md")
+          title, body = f"v{v}", ""
+          if notes.is_file():
+              body = notes.read_text(encoding="utf-8-sig")
+              first, _, rest = body.partition("\n")
+              if first.startswith("# "):
+                  title, body = first[2:].strip(), rest
+              body = body.split("## Verify the download")[0]
+          elif os.environ.get("GITHUB_REF_TYPE") == "tag":
+              sys.exit(f"manca {notes}: scrivi le note prima di creare il tag")
+          sums = pathlib.Path("dist/SHA256SUMS.txt").read_text(encoding="ascii").strip()
+          body = body.rstrip() + "\n\n## Verify the download\n\n```\n" + sums + "\n```\n"
+          pathlib.Path("dist/RELEASE_NOTES.md").write_text(body, encoding="utf-8")
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as env:
+              env.write(f"RELEASE_TITLE={title}\nVERSION={v}\n")
+          print(f"title: {title}\n\n{body}")
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-notes
+          path: |
+            dist/RELEASE_NOTES.md
+            dist/SHA256SUMS.txt
+          retention-days: 14
+
+      - name: Draft release
+        if: github.ref_type == 'tag'
+        run: |
+          v="$VERSION"
+          assets=("dist/Converter-v$v-windows.zip" "dist/Converter-v$v-setup.exe"
+                  "dist/Converter-v$v-x86_64.AppImage" "dist/converter_${v}_amd64.deb" dist/SHA256SUMS.txt)
+          if gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then
+            # Run ripetuto sullo stesso tag: aggiorna i file, non duplica la release.
+            gh release upload "$GITHUB_REF_NAME" "${assets[@]}" --clobber
+            gh release edit "$GITHUB_REF_NAME" --title "$RELEASE_TITLE" --notes-file dist/RELEASE_NOTES.md
+          else
+            gh release create "$GITHUB_REF_NAME" "${assets[@]}" --draft --verify-tag \
+              --title "$RELEASE_TITLE" --notes-file dist/RELEASE_NOTES.md
+          fi
