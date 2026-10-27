@@ -46,7 +46,7 @@ Three layers with a strict dependency direction (`gui → core ← converters`):
   - `Converter.verdict()`, `format_available()`, and `pair_available()` (src→dst) drive what
     the UI offers vs. greys out.
 - **`converters/`** — one module per category, each `@register`-ed. Contains the only I/O
-  backends (Pillow, ffmpeg, pandas, LibreOffice, pandoc, pdfminer, striprtf).
+  backends (Pillow, ffmpeg, pandas, LibreOffice, pdfminer, markdown-it-py/odfpy, striprtf).
 - **`gui/`** — PySide6 UI. Contains **zero** conversion logic.
 - **`cli/`** — command-line front-end (Phase 3 stub; skeleton documents the intended shape).
 
@@ -71,7 +71,7 @@ God nodes (most-connected core abstractions): `ConversionJob`, `MainWindow`, `re
 | `formats.py` | Canonical table of supported formats. |
 | `options.py` | Declarative options schema: `Option`, `IntOption`, `ChoiceOption`, `BoolOption`, `TextOption`. The GUI builds controls from this. |
 | `engine.py` | **Engine mode** FULL vs PORTABLE (see §6). |
-| `deps.py` | Runtime detection of external tools + controlled degradation. `find_ffmpeg/find_ffprobe/find_soffice/find_pandoc/find_tesseract/find_ghostscript/find_ocrmypdf`, `clean_subprocess_env()`. |
+| `deps.py` | Runtime detection of external tools + controlled degradation. `find_ffmpeg/find_ffprobe/find_soffice/find_tesseract/find_ghostscript/find_ocrmypdf`, `clean_subprocess_env()`. |
 | `paths.py` | User config dir (`%APPDATA%\Converter`), `config_dir/presets_file/history_file/libreoffice_profile_dir`, `atomic_write_json`. |
 | `presets.py` | Named conversion configs persisted to disk: `Preset`, `PresetStore`, `reconcile_options`. |
 | `history.py` | Completed-conversion history persisted to disk: `HistoryEntry`, `HistoryStore` (enables re-run). |
@@ -88,7 +88,7 @@ God nodes (most-connected core abstractions): `ConversionJob`, `MainWindow`, `re
 | `video.py` | ffmpeg | MP4/MKV/MOV/… incl. **video→GIF** | re-encode is lossy; advanced options (fps, duration) validated by a pure validator. |
 | `data.py` | pandas (+ openpyxl/odfpy/PyYAML/defusedxml) | csv/tsv/json/xlsx/ods/xml/yaml | row-faithful → lossless; XML parsed safely (defusedxml blocks billion-laughs/XXE). |
 | `document.py` | LibreOffice headless | Office docs (Writer/Calc/…) | FULL mode only; faithful Office conversions; greys out without LibreOffice. |
-| `markup.py` | pandoc (bundled binary) | markup/document interchange | pandoc-driven; `_OFFICE_OVERRIDE_OUT = {md, txt}` mostly covers odt→md/txt (docx→md/txt is claimed by `textdoc.py`, which also acts as fallback if python-docx is absent); docx/odt→**html** is NOT claimed here anymore (see §19), so it routes to LibreOffice. |
+| `markup.py` | in-process markup engine (`markupdoc/`: markdown-it-py, stdlib HTML parser, odfpy, python-docx) — replaced pandoc on 2026-10-27 | markup/document interchange | md/html/epub/txt → md/html/epub/txt/rtf/docx/odt and odt → md/txt; priority 12; sanitized HTML tree as the intermediate model; images never downloaded; docx/odt→**html** is NOT claimed here (see §19), so it routes to LibreOffice. |
 | `pdf.py` | pdfminer.six (pure-Python, MIT) | pdf→txt / pdf→html fallback | works in Portable; priority 10, so the structured engine normally wins those pairs. |
 | `textdoc.py` | pdfminer.six + python-docx (both MIT, in-process) | pdf→docx/odt/rtf/md/txt/html; docx→md/txt | structured IR (`docmodel/`); lossy with target-specific reasons; docx/md/txt/html in both modes, odt/rtf need FULL + soffice. See §21. |
 | `docmodel/` | — | IR + readers (`read_pdf`, `read_docx`) + writers (`write_docx`, `write_markdown`, `write_text`, `write_html`) | the single structure model behind `textdoc.py`; documented seam for optional AI refinement. |
@@ -131,7 +131,7 @@ API: `get_mode/set_mode/load_persisted/persist/refresh_deps/full_mode_missing`.
 
 - External tools are **detected at runtime, never assumed on PATH**:
   `deps.find_ffmpeg/find_ffprobe/find_soffice` also search standard install dirs and a bundled
-  `bin/`. ffmpeg/ffprobe/pandoc are bundled into the frozen app's `_internal/bin`.
+  `bin/`. ffmpeg/ffprobe are bundled into the frozen app's `_internal/bin` (pandoc was, until the in-process markup engine replaced it on 2026-10-27).
 - **Subprocess gotcha (critical):** spawn **every** external tool (soffice, ffmpeg, ffprobe)
   with `deps.clean_subprocess_env()`. A PyInstaller-frozen exe injects bundle dirs into
   `PATH`; without cleaning, LibreOffice's own Python loads our `python313.dll` and export
@@ -462,7 +462,7 @@ are emitted once instead of once per covered column.
 **Converter (`converters/textdoc.py`, `TextDocConverter`, `priority=20`).**
 Claims `pdf → {docx, odt, rtf, md, txt, html}` and `docx → {md, txt}`; every
 other pair stays on its existing engine (LibreOffice for office↔office and
-docx→html, pandoc for markup→office). `pdf.py` (pdfminer flat dump, priority 10)
+docx→html, the markup engine for markup→office). `pdf.py` (pdfminer flat dump, priority 10)
 remains the fallback for pdf→txt/html if the structured engine is unavailable.
 - **Availability:** in-process pdfminer.six + python-docx, so pdf→docx/md/txt/html
   work in **both** FULL and PORTABLE. odt/rtf need FULL mode + soffice for the

@@ -13,6 +13,7 @@ pdfminer.six>=20221105 # PDF layout extraction for the structured document engin
 python-docx>=1.1      # read/write DOCX for the structured engine (MIT; lxml comes with it)
 striprtf>=0.0.26      # rtf→txt (pure-Python, MIT) — works in Portable
 trimesh>=4.0          # 3D mesh conversions (pure-Python, MIT; hard dep numpy comes with pandas)
+markdown-it-py>=3.0   # Markdown reader of the markup engine (CommonMark/GFM, pure-Python, MIT)
 
 # --- Optional features (install only if you need them) ---
 # OCR of scanned PDFs (Full mode). ocrmypdf is MPL-2.0 and also needs the external
@@ -29,7 +30,7 @@ trimesh>=4.0          # 3D mesh conversions (pure-Python, MIT; hard dep numpy co
 #            Windows : winget install Gyan.FFmpeg
 #            macOS   : brew install ffmpeg
 #            Linux   : sudo apt install ffmpeg   (or dnf/pacman)
-# LibreOffice / pandoc : needed for document conversions (Phase 2).
+# LibreOffice : optional, enables the Full mode's faithful Office conversions.
 
 # --- Development / tests ---
 # pytest>=8.0

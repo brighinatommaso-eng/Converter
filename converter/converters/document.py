@@ -1,7 +1,7 @@
 """Converter documenti basato su LibreOffice headless (Tier E, fase 1).
 
-Copre i formati "office": docx/odt/rtf/pdf/html/txt. Markdown/EPUB (via pandoc)
-arriveranno in un tier successivo. La conversione di documenti è onestamente
+Copre i formati "office": docx/odt/rtf/pdf/html/txt. Markdown/EPUB li gestisce il
+motore markup in-process (markup.py). La conversione di documenti è onestamente
 *best-effort*: passare tra formati ricchi può spostare formattazione e layout, e
 importare da PDF è un'approssimazione (il PDF non ha un modello strutturale del
 testo). I verdetti lo dicono chiaramente.

@@ -36,7 +36,7 @@ tells you whether the conversion is lossless or lossy.
 | **Audio** (ffmpeg) | any audio | wav, flac, mp3, aac, m4a, ogg, opus |
 | **Video** (ffmpeg) | any video | mp4, mkv, mov, webm, avi, gif |
 | **Data** (pandas) | csv, tsv, json, yaml, xlsx, ods, xml | csv, tsv, json, yaml, xlsx, ods, xml |
-| **Documents** (structured engine / LibreOffice / pandoc) | pdf, docx, odt, rtf, md, txt, html, epub | docx, odt, rtf, pdf, md, txt, html, epub |
+| **Documents** (structured engine / markup engine / LibreOffice) | pdf, docx, odt, rtf, md, txt, html, epub | docx, odt, rtf, pdf, md, txt, html, epub |
 | **3D models** (trimesh) | obj, stl, ply, glb, gltf, 3mf | obj, stl, ply, glb, gltf |
 
 Notes:
@@ -49,6 +49,11 @@ Notes:
 - Document conversion is best effort, not pixel-faithful. PDF imports are rebuilt
   from the page geometry (headings, paragraphs, lists, tables) with pdfminer.six;
   the DOCX output can keep the editable structure or reproduce the printed layout.
+- Markdown, HTML, EPUB and plain text are converted by a built-in engine (no pandoc,
+  no LibreOffice needed): headings, emphasis, lists, tables, links, code and local
+  images become native Word/OpenDocument/RTF/EPUB structure. Remote images are
+  never downloaded (the app works offline): they stay links in HTML/Markdown and are
+  reported as dropped elsewhere. Markdown → HTML follows the CommonMark/GitHub rules.
 
 ## Download (Windows)
 
@@ -72,7 +77,7 @@ The **SHA256 checksums** of every file are in the release notes and in
 `SHA256SUMS.txt`, attached to every release.
 
 Both include `LICENSE`, `THIRD_PARTY_NOTICES.md` and a `licenses/`
-folder with the third-party license texts (ffmpeg, pandoc).
+folder with the third-party license texts (ffmpeg, Qt).
 
 ## Download (Linux)
 
@@ -80,8 +85,7 @@ Two downloads on the same [Releases page](https://github.com/brighinatommaso-eng
 
 - **`converter_X.Y.Z_amd64.deb`** (Ubuntu, Debian, Mint, Pop!_OS…): double-click it,
   or run `sudo apt install ./converter_X.Y.Z_amd64.deb`. Converter appears in the
-  application menu; ffmpeg and pandoc come from your distribution and are installed
-  with it. Remove it with `sudo apt remove converter`.
+  application menu; ffmpeg comes from your distribution and is installed with it. Remove it with `sudo apt remove converter`.
 - **`Converter-vX.Y.Z-x86_64.AppImage`** (any recent distro: Fedora, Arch, openSUSE…):
   one file with everything inside. Make it executable and run it:
   `chmod +x Converter-*.AppImage && ./Converter-*.AppImage`. It needs glibc 2.35 or
@@ -101,7 +105,7 @@ report on startup (also under **Help → Dependencies**).
 | Tool | Needed for | Bundled in the release? |
 |------|-----------|--------------------------|
 | **ffmpeg / ffprobe** | all audio & video | ✅ included in the bundle |
-| **pandoc** | markdown / html / epub / txt ↔ docx / odt / rtf | ✅ included in the bundle |
+| **markup engine** (built in) | markdown / html / epub / odt / txt → docx / odt / rtf / epub / html / md / txt | ✅ part of the app, nothing to install |
 | **LibreOffice** | office documents (docx/odt/rtf/html/pdf) | ❌ detected on your system — [install](https://www.libreoffice.org/download/) |
 | **Tesseract + Ghostscript + ocrmypdf** | OCR of scanned PDFs | ❌ detected on your system |
 
@@ -133,7 +137,7 @@ For audio/video you also need **ffmpeg** on your `PATH` (see the table above).
 ## Build
 
 The Windows executable is built with **PyInstaller** (onedir) using
-[`converter.spec`](converter.spec), which bundles ffmpeg/ffprobe/pandoc if they are
+[`converter.spec`](converter.spec), which bundles ffmpeg/ffprobe if they are
 found on `PATH` at build time:
 
 ```bash
@@ -168,5 +172,5 @@ GUI), and a watch-folder mode is not implemented.
 ## License
 
 MIT — see [`LICENSE`](LICENSE). Third-party components and their licenses are
-listed in [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md). ffmpeg, LibreOffice,
-pandoc and Tesseract are used as external tools / separate executables.
+listed in [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md). ffmpeg, LibreOffice
+and Tesseract are used as external tools / separate executables.

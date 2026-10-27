@@ -39,19 +39,19 @@ UNUSED_OPTIONAL_MODULES = [
 ]
 
 binaries = []
-# pandoc = motore markup PORTABLE (md/html/epub/docx/odt). Bundlato come ffmpeg in
-# _internal/bin, dove deps._locate("pandoc") lo cerca per primo. GPL ma è un binario
-# subprocess separato (mera aggregazione), stesso pattern di ffmpeg.
+# ffmpeg/ffprobe vanno in _internal/bin, dove deps._locate li cerca per primi. GPL
+# ma sono binari separati lanciati come processi (mera aggregazione). pandoc non
+# c'è più: md/html/epub/odt li converte il motore markup in-process (MIT).
 #
 # I tool NON passano dall'Analysis: PyInstaller analizza le dipendenze di ogni
 # eseguibile (anche se dichiarato in datas, lo riclassifica) e ne copia le librerie
 # nella radice di _internal, dove l'exe in bin/ non le cerca (e con ffmpeg "shared"
 # sarebbero copie doppie delle sue DLL). Vengono aggiunti dopo l'Analysis, come
 # file da copiare tali e quali: bin/ resta una cartella autosufficiente.
-# CONVERTER_BUNDLE_TOOLS=0: bundle SENZA ffmpeg/pandoc. Serve al pacchetto .deb,
-# che li dichiara come dipendenze e usa quelli del sistema (aggiornati da apt).
+# CONVERTER_BUNDLE_TOOLS=0: bundle SENZA ffmpeg. Serve al pacchetto .deb, che lo
+# dichiara come dipendenza e usa quello del sistema (aggiornato da apt).
 _bundled_tools = []
-for _tool in ("ffmpeg", "ffprobe", "pandoc"):
+for _tool in ("ffmpeg", "ffprobe"):
     if os.environ.get("CONVERTER_BUNDLE_TOOLS", "1") == "0":
         break
     _p = _real_tool(_tool)
@@ -100,6 +100,11 @@ hiddenimports += collect_submodules("pdfminer")
 # conversione 3D con ModuleNotFoundError. collect_submodules li include tutti.
 # lxml (per il 3mf) arriva già da python-docx: non serve duplicarlo.
 hiddenimports += collect_submodules("trimesh")
+# Motore markup (ha sostituito pandoc): markdown-it-py carica regole e preset da
+# moduli propri e odfpy definisce gli elementi ODF in sottomoduli; raccoglierli
+# tutti costa poco ed evita un "No module named" solo nell'exe.
+hiddenimports += collect_submodules("markdown_it") + collect_submodules("mdurl")
+hiddenimports += collect_submodules("odf")
 
 a = Analysis(
     # Entry con import ASSOLUTO: __main__.py usa import relativi che PyInstaller
@@ -193,13 +198,11 @@ coll = COLLECT(
 )
 
 # --- Testi di licenza accanto all'eseguibile ---------------------------------
-# ffmpeg (GPL-3) e pandoc (GPL-2) vengono ridistribuiti nel bundle: il testo della
-# loro licenza DEVE viaggiare con il binario. Prima THIRD_PARTY_NOTICES.md citava
-# una cartella `licenses/` che nessuno copiava. Qui finiscono nella radice della
-# release (dist/Converter/), accanto a Converter.exe, insieme a LICENSE e notices.
+# ffmpeg (GPL-3) viene ridistribuito nel bundle: il testo della sua licenza DEVE
+# viaggiare con il binario. Finisce nella radice della release (dist/Converter/),
+# accanto a Converter.exe, insieme a LICENSE e THIRD_PARTY_NOTICES.md.
 _dist_root = os.path.join(DISTPATH, "Converter")
-_required_licenses = {"ffmpeg": "ffmpeg-GPLv3.txt", "ffprobe": "ffmpeg-GPLv3.txt",
-                      "pandoc": "pandoc-GPLv2.txt"}
+_required_licenses = {"ffmpeg": "ffmpeg-GPLv3.txt", "ffprobe": "ffmpeg-GPLv3.txt"}
 for _src in _bundled_tools:
     _tool = os.path.splitext(os.path.basename(_src))[0].lower()
     _needed = _required_licenses.get(_tool)

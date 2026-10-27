@@ -4,8 +4,8 @@
 #   installer/linux/build-deb.sh <cartella onedir> <versione> <cartella output>
 #
 # La cartella onedir è quella di PyInstaller costruita con CONVERTER_BUNDLE_TOOLS=0:
-# ffmpeg e pandoc NON sono dentro, il pacchetto li dichiara come dipendenze e usa
-# quelli del sistema (aggiornati da apt, e il pacchetto resta piccolo).
+# ffmpeg NON è dentro: il pacchetto lo dichiara come dipendenza e usa quello del
+# sistema (aggiornato da apt, e il pacchetto resta piccolo).
 # Installa in /opt/converter, con `converter` in /usr/bin, voce nel menu e icone.
 set -euo pipefail
 
@@ -49,7 +49,7 @@ Priority: optional
 Architecture: amd64
 Maintainer: Tommaso Brighina <brighinatommaso-eng@users.noreply.github.com>
 Installed-Size: $installed_kb
-Depends: ffmpeg, pandoc, libegl1, libgl1, libxkbcommon-x11-0, libxcb-cursor0, libfontconfig1, libdbus-1-3
+Depends: ffmpeg, libegl1, libgl1, libxkbcommon-x11-0, libxcb-cursor0, libfontconfig1, libdbus-1-3
 Recommends: libreoffice-writer
 Suggests: ocrmypdf, tesseract-ocr
 Homepage: https://github.com/brighinatommaso-eng/Converter

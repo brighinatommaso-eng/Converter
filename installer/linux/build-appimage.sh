@@ -3,8 +3,8 @@
 #
 #   installer/linux/build-appimage.sh <cartella onedir> <versione> <cartella output> <appimagetool>
 #
-# La cartella onedir è quella di PyInstaller costruita con ffmpeg/ffprobe/pandoc
-# STATICI su PATH: finiscono in _internal/bin e l'AppImage non dipende da nulla di
+# La cartella onedir è quella di PyInstaller costruita con ffmpeg/ffprobe STATICI
+# su PATH: finiscono in _internal/bin e l'AppImage non dipende da nulla di
 # installato, a parte le librerie grafiche di base di ogni desktop (glibc ≥ quella
 # della macchina di build, GL/EGL, fontconfig, xkbcommon).
 set -euo pipefail

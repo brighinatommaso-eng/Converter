@@ -1,7 +1,7 @@
 """Converter rtf→txt basato su striprtf (pure-Python, MIT).
 
 Senza questo, in PORTABLE un file .rtf sarebbe un vicolo cieco: rtf→html/txt sono
-solo FULL (LibreOffice) e pandoc non legge l'RTF. striprtf dà almeno rtf→txt in
+solo FULL (LibreOffice) e il motore markup non legge l'RTF. striprtf dà almeno rtf→txt in
 ENTRAMBE le modalità — onesto (il formato si perde, resta il testo) e coerente con
 la regola "per i target che sacrificano il layout vince il motore puro".
 """

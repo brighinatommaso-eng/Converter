@@ -50,7 +50,7 @@ def _selftest(out_path: str | None) -> int:
 
     import converter.converters  # noqa: F401  (registra i converter)
     from converter.core import engine
-    from converter.core.deps import clean_subprocess_env, find_ffmpeg, find_pandoc, find_soffice, has_module
+    from converter.core.deps import clean_subprocess_env, find_ffmpeg, find_soffice, has_module
     from converter.core.job import ConversionJob
     from converter.core.pipeline import run_job
 
@@ -137,10 +137,9 @@ def _selftest(out_path: str | None) -> int:
 
     # --- PORTABLE: motori puri/bundlati, NIENTE LibreOffice --------------------
     # Il cuore della modalità Portable: queste conversioni devono riuscire da sole
-    # (pdfminer+python-docx in-bundle, pandoc in _internal/bin, striprtf in-bundle).
+    # (pdfminer+python-docx, motore markup con markdown-it/odfpy, striprtf: tutto in-bundle).
     # Le eseguiamo in PORTABLE proprio per provare che non passano da LibreOffice.
     engine.set_mode("PORTABLE")
-    has_pandoc = find_pandoc() is not None
     has_pdfminer = has_module("pdfminer")
     has_docx = has_module("docx")
     has_striprtf = has_module("striprtf")
@@ -176,21 +175,10 @@ def _selftest(out_path: str | None) -> int:
                     "portable pdf->html"):
             results[key] = "SKIP no pdfminer/python-docx"
 
-    # md -> html / docx (pandoc)
-    if has_pandoc:
-        try:
-            md = d / "m.md"
-            md.write_text("# Heading\n\nBody **bold**.\n", encoding="utf-8")
-            results["portable md->html"] = run_job(
-                ConversionJob(md, "md", "html", d / "m.html")).ok
-            results["portable md->docx"] = run_job(
-                ConversionJob(md, "md", "docx", d / "m.docx")).ok
-        except Exception as e:  # noqa: BLE001
-            results["portable md->html"] = f"ERR {type(e).__name__}: {e}"
-            results.setdefault("portable md->docx", results["portable md->html"])
-    else:
-        results["portable md->html"] = "SKIP no pandoc"
-        results["portable md->docx"] = "SKIP no pandoc"
+    # Motore markup in-process (ha sostituito pandoc): md → tutti i target, e
+    # ritorno da html/epub/odt. Controlla il contenuto, non solo ok=True: un
+    # modulo mancante nel bundle (markdown_it, odf) farebbe fallire qui.
+    results.update(_selftest_markup(d))
 
     # rtf -> txt (striprtf)
     if has_striprtf:
@@ -225,11 +213,25 @@ def _selftest(out_path: str | None) -> int:
             results["document txt->pdf"] = run_job(ConversionJob(txt, "txt", "pdf", d / "a.pdf")).ok
         except Exception as e:  # noqa: BLE001
             results["document txt->pdf"] = f"ERR {type(e).__name__}: {e}"
-        # Filtro di export DOCX: esattamente quello che dava 'no export filter'.
+        # Filtro di export DOCX di LibreOffice: esattamente quello che dava 'no export
+        # filter' nel bundle. txt->docx ora è in-process (motore markup), quindi qui
+        # si passa da odt->docx, che resta a LibreOffice: l'odt lo scrive il motore.
+        key = "document odt->docx (LibreOffice export filter)"
         try:
-            results["document txt->docx (pandoc/LibreOffice)"] = run_job(ConversionJob(txt, "txt", "docx", d / "a.docx")).ok
+            from converter.core.registry import resolve
+
+            odt = d / "a.odt"
+            run_job(ConversionJob(txt, "txt", "odt", odt))
+            routed = type(resolve("odt", "docx")).__name__
+            if routed != "DocumentConverter":
+                results[key] = f"FAIL odt->docx routed to {routed}"
+            elif not odt.exists():
+                results[key] = "FAIL txt->odt produced nothing"
+            else:
+                r = run_job(ConversionJob(odt, "odt", "docx", d / "a.docx"))
+                results[key] = True if r.ok else f"FAIL {r.error}"
         except Exception as e:  # noqa: BLE001
-            results["document txt->docx (pandoc/LibreOffice)"] = f"ERR {type(e).__name__}: {e}"
+            results[key] = f"ERR {type(e).__name__}: {e}"
         # Input BINARIO (docx) + export filter (odt): import+export di un
         # documento Writer. (NB: pdf->docx NON è testato qui perché LibreOffice
         # non sa convertire un PDF in formati Writer — limite suo, non del bundle.)
@@ -257,7 +259,7 @@ def _selftest(out_path: str | None) -> int:
         except Exception as e:  # noqa: BLE001
             results["pdf struct writer-targets"] = f"ERR {type(e).__name__}: {e}"
     else:
-        for k in ("document txt->pdf", "document txt->docx (pandoc/LibreOffice)", "document docx->odt",
+        for k in ("document txt->pdf", "document odt->docx (LibreOffice export filter)", "document docx->odt",
                   "document pdf->html", "pdf struct writer-targets"):
             results[k] = "SKIP no LibreOffice"
 
@@ -276,6 +278,69 @@ def _selftest(out_path: str | None) -> int:
         sys.stdout.write(text)
     shutil.rmtree(d, ignore_errors=True)  # non lasciare la tmpdir a disco
     return 0 if ok else 1
+
+
+def _selftest_markup(d) -> dict[str, object]:
+    """Motore markup in-process (ha sostituito pandoc): ogni scrittore e i lettori
+    di ritorno, controllando il contenuto prodotto e non solo ok=True."""
+    import zipfile
+
+    from converter.core.job import ConversionJob
+    from converter.core.pipeline import run_job
+
+    out: dict[str, object] = {}
+    md = d / "m.md"
+    md.write_text("# Heading\n\nBody **bold** and `code`.\n\n- one\n- two\n\n"
+                  "| a | b |\n|---|---|\n| 1 | 2 |\n", encoding="utf-8")
+
+    def run(src, src_fmt, dst_fmt, name, check):
+        try:
+            target = d / name
+            result = run_job(ConversionJob(src, src_fmt, dst_fmt, target))
+            if not result.ok:
+                return f"FAIL {result.error}"
+            verdict = check(target)
+            return True if verdict is True else f"FAIL {verdict}"
+        except Exception as e:  # noqa: BLE001
+            return f"ERR {type(e).__name__}: {e}"
+
+    def html_ok(path):
+        text = path.read_text(encoding="utf-8")
+        return "<h1>Heading</h1>" in text and "<strong>bold</strong>" in text or text[:200]
+
+    def docx_ok(path):
+        from docx import Document
+
+        styles = [p.style.name for p in Document(str(path)).paragraphs if p.text.strip()]
+        return "Heading 1" in styles and "List Bullet" in styles or styles
+
+    def odt_ok(path):
+        with zipfile.ZipFile(path) as z:
+            content = z.read("content.xml").decode("utf-8")
+        return "text:h" in content and "table:table" in content or content[:200]
+
+    def rtf_ok(path):
+        text = path.read_text(encoding="ascii")
+        return text.startswith("{\\rtf1") and "Heading" in text or text[:80]
+
+    def epub_ok(path):
+        with zipfile.ZipFile(path) as z:
+            first = z.infolist()[0]
+            ok = first.filename == "mimetype" and first.compress_type == zipfile.ZIP_STORED
+            return ok and "OEBPS/content.opf" in z.namelist() or z.namelist()[:4]
+
+    out["portable md->html"] = run(md, "md", "html", "m.html", html_ok)
+    out["portable md->docx"] = run(md, "md", "docx", "m.docx", docx_ok)
+    out["portable md->odt"] = run(md, "md", "odt", "m.odt", odt_ok)
+    out["portable md->rtf"] = run(md, "md", "rtf", "m.rtf", rtf_ok)
+    out["portable md->epub"] = run(md, "md", "epub", "m.epub", epub_ok)
+    out["portable epub->md (read back)"] = run(
+        d / "m.epub", "epub", "md", "back.md",
+        lambda p: "# Heading" in p.read_text(encoding="utf-8") or p.read_text(encoding="utf-8")[:120])
+    out["portable odt->txt (read back)"] = run(
+        d / "m.odt", "odt", "txt", "back.txt",
+        lambda p: "Body bold and code." in p.read_text(encoding="utf-8") or p.read_text(encoding="utf-8")[:120])
+    return out
 
 
 def _selftest_honesty_checks(d, ff, gen_media) -> dict[str, object]:
@@ -342,7 +407,7 @@ def _selftest_honesty_checks(d, ff, gen_media) -> dict[str, object]:
 
     check("data csv(;)->xlsx keeps columns", semicolon_csv)
 
-    # --- txt->md in-process (non deve dipendere da pandoc) -----------------------
+    # --- txt->md in-process (escape riga per riga, non il motore markup) -----------
     def text_to_md():
         src = work / "note.txt"
         src.write_text("# not a heading\nline two\n", encoding="utf-8")
@@ -406,7 +471,7 @@ def _selftest_honesty_checks(d, ff, gen_media) -> dict[str, object]:
             return "SKIP not frozen"
         root = Path(sys.executable).parent
         needed = ["LICENSE", "THIRD_PARTY_NOTICES.md", "licenses/ffmpeg-GPLv3.txt",
-                  "licenses/pandoc-GPLv2.txt", "licenses/Qt-PySide6-LGPLv3.txt"]
+                  "licenses/Qt-PySide6-LGPLv3.txt"]
         missing = [name for name in needed if not (root / name).is_file()]
         return True if not missing else f"FAIL missing {missing}"
 

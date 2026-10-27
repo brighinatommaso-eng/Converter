@@ -4,7 +4,7 @@
      completa, per giunta doppia).
 10 — _ffmpeg: probe_duration ha un timeout; run_ffmpeg pulisce l'output su
      cancel/errore (vedi anche 11).
-11 — output parziali rimossi su fallimento (pandoc, pdfminer, ffmpeg).
+11 — output parziali rimossi su fallimento (motore markup, pdfminer, ffmpeg).
 12 — converter_app: stdout può essere None nell'exe windowed → guardia.
 """
 
@@ -40,45 +40,49 @@ def test_probe_duration_passes_timeout(monkeypatch):
     assert captured.get("timeout")  # timeout duro passato a subprocess.run
 
 
-# --- Rischio 11: pandoc rimuove l'output parziale su fallimento -----------------
+# --- Rischio 11: il motore markup rimuove l'output parziale su fallimento ---------
 
-def test_pandoc_removes_partial_output_on_failure(monkeypatch, tmp_path):
+def test_markup_removes_partial_output_on_failure(monkeypatch, tmp_path):
+    """Uno scrittore che si rompe a metà non lascia il file mezzo scritto."""
+    import converter.converters.markupdoc as md
+
+    def broken_writer(document, path):
+        path.write_text("output scritto a metà", encoding="utf-8")
+        raise RuntimeError("boom")
+
+    monkeypatch.setitem(md.WRITERS, "html", broken_writer)
     import converter.converters.markup as mk
-
-    monkeypatch.setattr(mk.deps, "find_pandoc", lambda: "C:/fake/pandoc.exe")
-    monkeypatch.setattr(mk.subprocess, "run",
-                        lambda *a, **k: _FakeProc(returncode=1, stderr="boom"))
 
     src = tmp_path / "a.md"
     src.write_text("# hi", encoding="utf-8")
     out = tmp_path / "o.html"
-    out.write_text("output scritto a metà", encoding="utf-8")  # partial di -o
-
     res = mk.MarkupConverter().convert(ConversionJob(src, "md", "html", out), lambda e: None)
-    assert not res.ok
+    assert not res.ok and "boom" in res.error
     assert not out.exists()  # parziale rimosso, non lasciato accanto all'errore
 
 
-def test_pandoc_timeout_removes_partial_output(monkeypatch, tmp_path):
-    import subprocess
+def test_markup_cancel_during_write_removes_output(monkeypatch, tmp_path):
+    """Annulla arrivato mentre si scrive: niente file a metà e esito 'cancelled'."""
+    import converter.converters.markupdoc as md
 
+    job_holder = {}
+    real = md.WRITERS["html"]
+
+    def writer_then_cancel(document, path):
+        report = real(document, path)
+        job_holder["job"].cancel.cancel()
+        return report
+
+    monkeypatch.setitem(md.WRITERS, "html", writer_then_cancel)
     import converter.converters.markup as mk
-
-    monkeypatch.setattr(mk.deps, "find_pandoc", lambda: "C:/fake/pandoc.exe")
-
-    def boom(*a, **k):
-        raise subprocess.TimeoutExpired(cmd="pandoc", timeout=1)
-
-    monkeypatch.setattr(mk.subprocess, "run", boom)
 
     src = tmp_path / "a.md"
     src.write_text("# hi", encoding="utf-8")
     out = tmp_path / "o.html"
-    out.write_text("partial", encoding="utf-8")
-
-    res = mk.MarkupConverter().convert(ConversionJob(src, "md", "html", out), lambda e: None)
-    assert not res.ok and "timed out" in res.error.lower()
-    assert not out.exists()
+    job = ConversionJob(src, "md", "html", out)
+    job_holder["job"] = job
+    res = mk.MarkupConverter().convert(job, lambda e: None)
+    assert res.cancelled and not out.exists()
 
 
 # --- Rischio 11: pdfminer rimuove l'output parziale su fallimento ---------------
@@ -157,7 +161,6 @@ def test_gpl_license_texts_ship_with_the_build():
     root = Path(__file__).resolve().parent.parent
     for name, first_line in (("ffmpeg-GPLv3.txt", "GNU GENERAL PUBLIC LICENSE"),
                              ("ffmpeg-LGPLv2.1.txt", "GNU LESSER GENERAL PUBLIC LICENSE"),
-                             ("pandoc-GPLv2.txt", "GNU GENERAL PUBLIC LICENSE"),
                              ("Qt-PySide6-LGPLv3.txt", "GNU LESSER GENERAL PUBLIC LICENSE")):
         text = (root / "licenses" / name).read_text(encoding="utf-8")
         assert first_line in text[:200], name

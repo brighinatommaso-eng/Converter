@@ -65,7 +65,7 @@ class PlainTextMarkdownConverter(Converter):
     name = "Plain text → Markdown"
     input_formats = frozenset({"txt"})
     output_formats = frozenset({"md"})
-    priority = 15  # batte pandoc (10), che rifonderebbe il testo come markdown
+    priority = 15  # batte il motore markup (12): qui ogni riga resta com'è, con l'escape
 
     def verdict(self, src: str, dst: str, options: dict | None = None) -> QualityVerdict:
         if src != "txt" or dst != "md":
