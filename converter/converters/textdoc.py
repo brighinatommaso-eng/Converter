@@ -32,7 +32,7 @@ from ..core.base import Converter
 from ..core.deps import DependencyStatus, libreoffice_install_hint
 from ..core.formats import primary_ext
 from ..core.job import ConversionJob, ConversionResult, ProgressCallback, ProgressEvent, cancelled_result
-from ..core.options import BoolOption, ChoiceOption, Option
+from ..core.options import BoolOption, Option
 from ..core.quality import QualityVerdict, lossy, unsupported
 from ..core.registry import register
 from . import _ocr
@@ -56,13 +56,6 @@ _DOCX_OVERRIDE_OUT = frozenset({"md", "txt"})
 # si concatena INTERNAMENTE docx→odt/rtf con LibreOffice, come faceva l'import
 # PDF precedente (registry.resolve non concatena da solo).
 _SECOND_HOP = frozenset({"odt", "rtf"})
-
-_LAYOUT_HELP = (
-    "Editable structure keeps real Word headings, lists and tables. Visual layout "
-    "positions every line exactly where it was printed (best for print-like copies; "
-    "text no longer reflows)."
-)
-
 
 def _pdf_error(exc: Exception) -> str:
     """Messaggio leggibile per un PDF che pdfminer rifiuta.
@@ -122,21 +115,16 @@ class TextDocConverter(Converter):
     def verdict(self, src: str, dst: str, options: dict | None = None) -> QualityVerdict:
         if not self._supported(src, dst):
             return unsupported()
-        opts = options or {}
         if src == "pdf":
-            if dst == "docx" and opts.get("docx_layout") == "visual":
-                return lossy(
-                    "PDF has no structural text model: each printed line is placed where it "
-                    "was printed, so the page looks like the original. Lines are separate "
-                    "frames, not real paragraphs/tables — editing or rewrapping will not "
-                    "reflow the text.")
             if dst == "docx":
                 return lossy(
                     "PDF has no structural text model: headings, paragraphs, lists, tables and "
                     "figures are detected by a local AI layout model and the page geometry (the "
-                    "words themselves come from the PDF). Fonts, sizes and colours are carried "
-                    "over, so the result is editable and visually close — but absolutely "
-                    "positioned elements (text boxes, overlapping graphics) are not reproduced.")
+                    "words themselves come from the PDF). The Word file is both editable and laid "
+                    "out like the original: one section per page with its size and margins, "
+                    "real columns, measured spacing, fonts, colours, shaded boxes, headers and "
+                    "footers. Lines may wrap differently where the original font is not installed, "
+                    "and overlapping graphics or text drawn over images are approximated.")
             if dst == "md":
                 return lossy(
                     "Markdown keeps the text, the heading hierarchy, the lists and the tables "
@@ -166,10 +154,6 @@ class TextDocConverter(Converter):
     def options_schema(self, src: str, dst: str) -> list[Option]:
         if src == "pdf" and dst == "docx":
             return [
-                ChoiceOption("docx_layout", "Layout", "structure",
-                             [("structure", "Editable structure"),
-                              ("visual", "Visual layout (as printed)")],
-                             help=_LAYOUT_HELP),
                 BoolOption("page_breaks", "Keep page breaks", True,
                            help="Insert a page break where the original PDF had one."),
             ]
@@ -191,7 +175,6 @@ class TextDocConverter(Converter):
 
     def convert(self, job: ConversionJob, progress: ProgressCallback) -> ConversionResult:
         options = job.options or {}
-        layout = str(options.get("docx_layout", "structure"))
         page_breaks = bool(options.get("page_breaks", True))
 
         with tempfile.TemporaryDirectory() as raw_tmp:
@@ -246,7 +229,7 @@ class TextDocConverter(Converter):
                 return cancelled_result()
             progress(ProgressEvent(0.75, "Writing " + job.dst_format.upper() + "…"))
             try:
-                report = self._write(document, job, tmp, layout, page_breaks, progress)
+                report = self._write(document, job, tmp, page_breaks, progress)
             except Exception as exc:  # scrittore: errore pulito, mai stacktrace
                 job.output_path.unlink(missing_ok=True)
                 return ConversionResult(ok=False,
@@ -274,10 +257,10 @@ class TextDocConverter(Converter):
         return ConversionResult(ok=True, output_path=job.output_path, output_size=size,
                                 verdict=verdict)
 
-    def _write(self, document, job: ConversionJob, tmp: Path, layout: str,
+    def _write(self, document, job: ConversionJob, tmp: Path,
                page_breaks: bool, progress: ProgressCallback) -> WriteReport:
         if job.dst_format == "docx":
-            return write_docx(document, job.output_path, layout=layout, page_breaks=page_breaks)
+            return write_docx(document, job.output_path, page_breaks=page_breaks)
         if job.dst_format == "md":
             return write_markdown(document, job.output_path)
         if job.dst_format == "txt":
@@ -286,7 +269,7 @@ class TextDocConverter(Converter):
             return write_html(document, job.output_path)
         # odt/rtf: docx intermedio + secondo salto LibreOffice (catena interna).
         intermediate = tmp / (job.src_path.stem + ".docx")
-        report = write_docx(document, intermediate, layout=layout, page_breaks=page_breaks)
+        report = write_docx(document, intermediate, page_breaks=page_breaks)
         progress(ProgressEvent(0.85, "Converting with LibreOffice…"))
         ok, payload = run_convert(intermediate, primary_ext(job.dst_format), tmp,
                                   timeout=DEFAULT_TIMEOUT)

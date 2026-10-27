@@ -51,9 +51,10 @@ Notes:
   1–2 s per page): it finds titles, paragraphs, tables, figures and formulas on the
   rendered page and the reading order of multi-column layouts. The words always come
   from the PDF itself (pdfminer.six), never from the model. Charts and formulas
-  become images. The DOCX output can keep the editable structure or reproduce the
-  printed layout. If the model is missing, the page geometry alone is used and the
-  badge says so.
+  become images. The DOCX output is one file that is both editable and laid out like
+  the original: page sizes and margins, columns, spacing, headings, lists, tables,
+  coloured boxes, backgrounds, headers/footers with page numbers. If the model is
+  missing, the page geometry alone is used and the badge says so.
 - Markdown, HTML, EPUB and plain text are converted by a built-in engine (no pandoc,
   no LibreOffice needed): headings, emphasis, lists, tables, links, code and local
   images become native Word/OpenDocument/RTF/EPUB structure. Remote images are

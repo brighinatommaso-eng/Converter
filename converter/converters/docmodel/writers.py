@@ -1,8 +1,8 @@
 """Scrittori IR → formato. Un solo modello, tanti bersagli.
 
-docx  — struttura Word vera (Heading N, liste native, tabelle, immagini) con la
-        formattazione dell'originale (font, corpo, colori, rientri); con
-        layout="visual" ogni riga diventa un frame posizionato come nel PDF.
+docx  — struttura Word vera (Heading N, liste native, tabelle, immagini) E
+        impaginazione dell'originale (sezioni per pagina, colonne, spaziature):
+        lo scrittore è in docx_faithful.py.
 md    — GFM: ATX headings, liste, tabelle pipe; immagini inline in data-URI.
 txt   — ordine di lettura, tabelle tab-separate, liste con "- ".
 html  — HTML semantico con stili inline e immagini incorporate (nessun file
@@ -80,6 +80,12 @@ def _readable_color(color: str) -> str:
     r, g, b = (int(color[i:i + 2], 16) for i in (1, 3, 5))
     luminance = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255
     return "" if luminance > 0.85 else color
+
+
+def _furniture(paragraphs: list[Paragraph]) -> list[Paragraph]:
+    """Testatina/piè di pagina per i formati senza pagine: il numero di pagina
+    (ruolo "page_number") lì non significa nulla e si omette."""
+    return [p for p in paragraphs if p.role != "page_number"]
 
 
 def _run_style(run: Run) -> str:
@@ -315,7 +321,7 @@ def _list_entries(block: ListBlock, body_of) -> list[tuple[int, str, str]]:
 
 def _md_blocks(document: Document, report: WriteReport) -> list[str]:
     blocks: list[str] = []
-    for paragraph in document.headers:
+    for paragraph in _furniture(document.headers):
         text = _md_block_escape(_md_runs(_paragraph_runs(paragraph)).strip())
         if text:
             blocks.append(text)
@@ -366,7 +372,7 @@ def _md_blocks(document: Document, report: WriteReport) -> list[str]:
             blocks.append(f'<img alt="image" src="data:{mime};base64,{payload}">')
         elif isinstance(block, PageBreak):
             continue
-    for paragraph in document.footers:
+    for paragraph in _furniture(document.footers):
         text = _md_block_escape(_md_runs(_paragraph_runs(paragraph)).strip())
         if text:
             blocks.append(text)
@@ -383,7 +389,7 @@ def write_markdown(document: Document, path: Path) -> WriteReport:
 
 def write_text(document: Document, path: Path) -> WriteReport:
     chunks: list[str] = []
-    for paragraph in document.headers:
+    for paragraph in _furniture(document.headers):
         text = paragraph.text.strip()
         if text:
             chunks.append(text)
@@ -403,7 +409,7 @@ def write_text(document: Document, path: Path) -> WriteReport:
                 chunks.append("\n".join("\t".join(cell for cell in row) for row in rows))
         elif isinstance(block, PageBreak):
             continue
-    for paragraph in document.footers:
+    for paragraph in _furniture(document.footers):
         text = paragraph.text.strip()
         if text:
             chunks.append(text)
@@ -502,7 +508,7 @@ def write_html(document: Document, path: Path) -> WriteReport:
     parts.append("</head><body>")
     if document.headers:
         parts.append("<header>")
-        for paragraph in document.headers:
+        for paragraph in _furniture(document.headers):
             content = _html_runs(_paragraph_runs(paragraph))
             if content.strip():
                 parts.append(f"<p>{content}</p>")
@@ -536,7 +542,7 @@ def write_html(document: Document, path: Path) -> WriteReport:
             parts.append(f'<p><img alt="image" src="data:{mime};base64,{payload}"></p>')
     if document.footers:
         parts.append("<footer>")
-        for paragraph in document.footers:
+        for paragraph in _furniture(document.footers):
             content = _html_runs(_paragraph_runs(paragraph))
             if content.strip():
                 parts.append(f"<p>{content}</p>")
@@ -548,10 +554,15 @@ def write_html(document: Document, path: Path) -> WriteReport:
 
 # --- DOCX -------------------------------------------------------------------
 
-def _set_run(docx_run, run: Run) -> None:
+_XML_INVALID_RE = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\ufffe\uffff]")
+
+
+def _set_run(docx_run, run: Run, *, keep_light: bool = False) -> None:
     from docx.shared import Pt, RGBColor
 
-    docx_run.text = run.text
+    # Caratteri di controllo (NUL, form feed…) arrivano da PDF malformati: in XML
+    # non sono ammessi e python-docx rifiutava l'intero documento.
+    docx_run.text = _XML_INVALID_RE.sub("", run.text)
     if run.font:
         from docx.oxml.ns import qn
 
@@ -567,7 +578,9 @@ def _set_run(docx_run, run: Run) -> None:
         docx_run.font.italic = True
     if run.underline:
         docx_run.font.underline = True
-    if _readable_color(run.color):
+    if (run.color and _COLOR_RE.match(run.color)) if keep_light else _readable_color(run.color):
+        # keep_light: dietro al testo c'è lo sfondo (riquadro colorato, foto della
+        # pagina), quindi il bianco resta leggibile e va conservato.
         try:
             docx_run.font.color.rgb = RGBColor.from_string(run.color.lstrip("#").upper())
         except ValueError:
@@ -642,40 +655,6 @@ def _restarted_num_id(document, style_name: str, cache: dict[str, int],
     return cache[style_name]
 
 
-def _write_list(document, block: ListBlock) -> None:
-    from docx.shared import Pt
-
-    restarted: dict[str, int] = {}
-    for item in block.items:
-        level = max(1, min(item.level, 3))
-        ordered = item.is_ordered(block)
-        style: str | None = None
-        if ordered and item.marker.rstrip(".)").isdigit():
-            style = "List Number" if level == 1 else f"List Number {level}"
-        elif not ordered:
-            style = "List Bullet" if level == 1 else f"List Bullet {level}"
-        paragraph = None
-        if style:
-            try:
-                paragraph = document.add_paragraph(style=style)
-            except KeyError:
-                paragraph = None
-        if paragraph is None:
-            paragraph = document.add_paragraph()
-            paragraph.add_run(f"{item.marker} ")
-            paragraph.paragraph_format.left_indent = Pt((level - 1) * 18)
-        elif ordered:
-            num_id = _restarted_num_id(document, style, restarted, _marker_start(item.marker))
-            if num_id is not None:
-                num_pr = paragraph._p.get_or_add_pPr().get_or_add_numPr()
-                num_pr.get_or_add_numId().val = num_id
-        _add_runs(paragraph, _paragraph_runs(item.paragraph), item.paragraph)
-        # Gli stili lista hanno un proprio rientro: la geometria del PDF lo
-        # sovrascriverebbe in modo sbagliato, quindi qui vale il livello.
-        if item.paragraph.align != "left":
-            _set_paragraph_format(paragraph, item.paragraph)
-
-
 def _clear_cell(docx_cell) -> None:
     """Svuota una cella lasciando un solo paragrafo vuoto (requisito Word)."""
     from docx.oxml import OxmlElement
@@ -738,207 +717,10 @@ def _write_table(document, table: Table) -> None:
             _fill_cell(target, cell)
 
 
-def _write_image(document, image: ImageBlock, report: WriteReport) -> None:
-    from docx.shared import Pt
-
-    width = Pt(image.width_pt) if image.width_pt > 1 else None
-    for data in (image.data, None):
-        if data is None:
-            # Formato che Word/python-docx non accetta (JPEG 2000, EMF, TIFF
-            # CCITT…): si ritenta in PNG prima di arrendersi.
-            data = _png_from(image.data)
-            if data is None:
-                break
-        try:
-            document.add_picture(BytesIO(data), width=width)
-            return
-        except Exception:
-            continue
-    report.dropped_images += 1   # dichiarato nel verdetto, non perso in silenzio
-
-
-def _write_furniture(docx, document: Document) -> None:
-    """Testatina/piè di pagina della prima sezione, se l'IR li conserva."""
-    section = docx.sections[0]
-    for container, paragraphs in ((section.header, document.headers),
-                                  (section.footer, document.footers)):
-        if not paragraphs:
-            continue
-        existing = container.paragraphs
-        used_existing = False
-        for source in paragraphs:
-            runs = _paragraph_runs(source)
-            if not runs:
-                continue
-            if not used_existing and existing:
-                target = existing[0]
-                used_existing = True
-            else:
-                target = container.add_paragraph()
-            _add_runs(target, runs, source)
-            _set_paragraph_format(target, source)
-
-
-def write_docx(document: Document, path: Path, *, layout: str = "structure",
-               page_breaks: bool = True) -> WriteReport:
-    from docx import Document as DocxDocument
-    from docx.enum.section import WD_ORIENT
-    from docx.shared import Pt
+def write_docx(document: Document, path: Path, *, page_breaks: bool = True) -> WriteReport:
+    """DOCX modificabile E impaginato come l'originale (vedi docx_faithful)."""
+    from .docx_faithful import write_faithful_docx
 
     report = WriteReport()
-    docx = DocxDocument()
-    section = docx.sections[0]
-    section.page_width = Pt(document.page_width_pt)
-    section.page_height = Pt(document.page_height_pt)
-    if document.page_width_pt > document.page_height_pt:
-        section.orientation = WD_ORIENT.LANDSCAPE
-    if layout == "visual":
-        # I frame sono ancorati alla pagina: i margini devono essere zero,
-        # altrimenti Word somma il margine all'offset.
-        section.left_margin = section.right_margin = Pt(0)
-        section.top_margin = section.bottom_margin = Pt(0)
-        _write_visual_docx(docx, document, report)
-        docx.save(str(path))
-        return report
-
-    section.left_margin = Pt(max(document.margin_left_pt, 28))
-    section.right_margin = Pt(max(document.margin_right_pt, 28))
-
-    for block in document.blocks:
-        if isinstance(block, Paragraph):
-            if block.style == "title":
-                paragraph = docx.add_paragraph(style="Title")
-            elif block.style == "heading":
-                try:
-                    paragraph = docx.add_paragraph(style=f"Heading {max(1, min(block.level, 6))}")
-                except KeyError:
-                    paragraph = docx.add_paragraph()
-            else:
-                paragraph = docx.add_paragraph()
-            _add_runs(paragraph, _paragraph_runs(block), block)
-            _set_paragraph_format(paragraph, block)
-        elif isinstance(block, ListBlock):
-            _write_list(docx, block)
-        elif isinstance(block, Table):
-            _write_table(docx, block)
-        elif isinstance(block, ImageBlock):
-            _write_image(docx, block, report)
-        elif isinstance(block, PageBreak) and page_breaks:
-            docx.add_page_break()
-    # Un corpo docx deve chiudersi con un paragrafo (Word rifiuta una tabella in
-    # coda); non ne servono altri tra un blocco e l'altro.
-    if document.blocks and isinstance(document.blocks[-1], Table):
-        docx.add_paragraph()
-    _write_furniture(docx, document)
-    docx.save(str(path))
+    write_faithful_docx(document, path, report, page_breaks=page_breaks)
     return report
-
-
-def _write_visual_docx(docx, document: Document, report: WriteReport) -> None:
-    """Layout visivo: una riga = un frame Word nella posizione esatta del PDF.
-
-    Si perde la rifiusione (Word non ricalcola le righe) in cambio della
-    corrispondenza visiva: è il modo onesto di dare "come l'originale" senza
-    rasterizzare la pagina. Le tabelle diventano testo posizionato (le celle
-    restano ai loro posti, ma non sono una tabella Word).
-    """
-    for block in document.blocks:
-        if isinstance(block, Paragraph):
-            for line in block.lines:
-                _add_visual_line(docx, line, document.page_height_pt)
-        elif isinstance(block, ListBlock):
-            for item in block.items:
-                for index, line in enumerate(item.paragraph.lines):
-                    # Il proiettile è stato tolto dall'IR (serve a md/txt/docx
-                    # strutturale): nel layout visivo torna com'era.
-                    if index == 0:
-                        line = _with_marker(line, item.marker)
-                    _add_visual_line(docx, line, document.page_height_pt)
-        elif isinstance(block, Table):
-            for row in block.rows:
-                for cell in row:
-                    for paragraph in cell.paragraphs:
-                        for line in paragraph.lines:
-                            _add_visual_line(docx, line, document.page_height_pt)
-        elif isinstance(block, ImageBlock):
-            _add_visual_image(docx, block, document.page_height_pt, report)
-        elif isinstance(block, PageBreak):
-            # I frame sono ancorati alla pagina: senza il salto, la pagina 2
-            # finirebbe sopra la 1.
-            docx.add_page_break()
-
-
-def _with_marker(line, marker: str):
-    """Copia della riga con il proiettile/numero davanti al primo run."""
-    from .types import Line
-
-    runs = [Run(text=r.text, bold=r.bold, italic=r.italic, underline=r.underline,
-                font=r.font, size=r.size, color=r.color, link=r.link) for r in line.runs]
-    prefix = f"{marker} "
-    if runs:
-        runs[0].text = prefix + runs[0].text
-    else:
-        runs = [Run(text=prefix)]
-    return Line(runs=runs, x=line.x, y=line.y, width=line.width, height=line.height)
-
-
-def _frame(paragraph, x: float, y: float, width: float, height: float, page_height: float) -> None:
-    """Ancora il paragrafo a (x, y) misurati dall'alto-sinistra della pagina."""
-    from docx.enum.text import WD_ALIGN_PARAGRAPH
-    from docx.oxml import OxmlElement
-    from docx.oxml.ns import qn
-    from docx.shared import Pt
-
-    fmt = paragraph.paragraph_format
-    fmt.space_before = Pt(0)
-    fmt.space_after = Pt(0)
-    fmt.line_spacing = 1.0
-    fmt.left_indent = Pt(0)
-    fmt.first_line_indent = Pt(0)
-    paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT
-    p_pr = paragraph._p.get_or_add_pPr()
-    element = OxmlElement("w:framePr")
-    element.set(qn("w:w"), str(int(max(width + 6, 24) * 20)))
-    element.set(qn("w:h"), str(int(max(height, 8) * 20)))
-    element.set(qn("w:hRule"), "atLeast")
-    element.set(qn("w:x"), str(int(max(x, 0) * 20)))
-    element.set(qn("w:y"), str(int(max(page_height - (y + height), 0) * 20)))
-    element.set(qn("w:hAnchor"), "page")
-    element.set(qn("w:vAnchor"), "page")
-    element.set(qn("w:wrap"), "none")
-    # L'ordine dei figli di w:pPr è uno schema (non libero): framePr va prima
-    # di spacing/ind/jc, altrimenti Word può ignorare il frame o "riparare" il file.
-    p_pr.insert_element_before(
-        element,
-        "w:widowControl", "w:numPr", "w:suppressLineNumbers", "w:pBdr", "w:shd",
-        "w:tabs", "w:suppressAutoHyphens", "w:kinsoku", "w:wordWrap", "w:overflowPunct",
-        "w:topLinePunct", "w:autoSpaceDE", "w:autoSpaceDN", "w:bidi", "w:adjustRightInd",
-        "w:snapToGrid", "w:spacing", "w:ind", "w:contextualSpacing", "w:mirrorIndents",
-        "w:suppressOverlap", "w:jc", "w:textDirection", "w:textAlignment",
-        "w:textboxTightWrap", "w:outlineLvl", "w:divId", "w:cnfStyle", "w:rPr",
-        "w:sectPr", "w:pPrChange",
-    )
-
-
-def _add_visual_line(docx, line, page_height: float) -> None:
-    paragraph = docx.add_paragraph()
-    _add_runs(paragraph, line.runs)
-    _frame(paragraph, line.x, line.y, line.width, max(line.height, line.size * 1.25), page_height)
-
-
-def _add_visual_image(docx, image: ImageBlock, page_height: float, report: WriteReport) -> None:
-    from docx.shared import Pt
-
-    paragraph = docx.add_paragraph()
-    for data in (image.data, _png_from(image.data)):
-        if data is None:
-            continue
-        try:
-            paragraph.add_run().add_picture(BytesIO(data), width=Pt(image.width_pt or 100))
-            break
-        except Exception:
-            continue
-    else:
-        report.dropped_images += 1
-        return
-    _frame(paragraph, image.x, image.y, image.width_pt, image.height_pt, page_height)

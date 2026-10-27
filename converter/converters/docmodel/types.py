@@ -135,6 +135,9 @@ class Paragraph:
     # "body" (paragrafo di una regione di testo: mai un titolo), "" = lo decide
     # l'euristica dei corpi.
     role: str = ""
+    # Riquadro colorato dietro al paragrafo nel PDF ("#RRGGBB", "" = nessuno): il
+    # writer docx lo rende come ombreggiatura del paragrafo (resta modificabile).
+    shading: str = ""
 
     @property
     def text(self) -> str:
@@ -225,6 +228,7 @@ class TableCell:
     col: int = -1                # colonna logica (0-based), -1 = posizione sequenziale
     col_span: int = 1            # merge orizzontale Word (w:gridSpan)
     row_span: int = 1            # merge verticale Word (w:vMerge restart/continue)
+    shading: str = ""            # colore di fondo della cella ("#RRGGBB")
 
 
 @dataclass(slots=True)
@@ -352,6 +356,12 @@ class Document:
     # Analisi del layout: pagine ricostruite dal modello AI e pagine rimaste al
     # motore euristico (modello assente, pagina ruotata, errore). Il verdetto lo
     # dichiara: le due strade non danno la stessa qualità.
+    # Dimensioni (larghezza, altezza) in punti di ogni pagina dell'originale, in
+    # ordine: il writer docx dà a ogni pagina la sua sezione con le sue misure.
+    page_sizes: list[tuple[float, float]] = field(default_factory=list)
+    # Pagine scansionate con testo OCR invisibile sopra l'immagine: nel docx vale il
+    # testo (modificabile), non la foto della scansione con il testo sovrapposto.
+    ocr_pages: list[int] = field(default_factory=list)
     ai_pages: int = 0
     heuristic_pages: int = 0
     ai_unavailable: str = ""

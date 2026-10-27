@@ -120,6 +120,33 @@ def _color_of(char) -> str:
     return f"#{r:02x}{g:02x}{b:02x}"
 
 
+def _fill_color(shape) -> str:
+    """Colore di riempimento di un rettangolo/forma pdfminer in #RRGGBB ("" = nessuno/bianco)."""
+    if not getattr(shape, "fill", False):
+        return ""
+    value = getattr(shape, "non_stroking_color", None)
+    try:
+        if value is None:
+            return ""
+        vals = [float(value)] if isinstance(value, (int, float)) else [float(v) for v in value]
+    except Exception:
+        return ""      # pattern o spazio colore esotico: nessun colore affidabile
+    if len(vals) == 1:
+        r = g = b = max(0, min(255, int(round(vals[0] * 255))))
+    elif len(vals) == 3:
+        r, g, b = (max(0, min(255, int(round(v * 255)))) for v in vals)
+    elif len(vals) == 4:
+        c, m, y, k = vals
+        r = int(round(255 * (1 - c) * (1 - k)))
+        g = int(round(255 * (1 - m) * (1 - k)))
+        b = int(round(255 * (1 - y) * (1 - k)))
+    else:
+        return ""
+    if min(r, g, b) >= 250:
+        return ""      # bianco su pagina bianca: non è uno sfondo visibile
+    return f"#{r:02x}{g:02x}{b:02x}"
+
+
 # pdfminer scrive "(cid:N)" per un glifo che il font non mappa su Unicode (niente
 # ToUnicode): il carattere vero è ignoto. Lasciarlo dava testo spazzatura,
 # toglierlo poteva cambiare il senso (un segno meno perso: −0,94 → 0,94).
@@ -1204,10 +1231,19 @@ def _normalise_margin_text(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
-def _drop_repeated_margins(pages: list[dict], page_height: float) -> None:
-    """Toglie solo le righe di margine RIPETUTE (>=2 pagine), non i titoli di testa."""
+_PAGE_NUMBER_KEY_RE = re.compile(r"^[\W_]*(page|pagina|pag\.?|p\.)?\s*#(\s*(of|di|/)\s*#)?[\W_]*$")
+
+
+def _drop_repeated_margins(pages: list[dict], page_height: float) -> tuple[list[Paragraph], list[Paragraph]]:
+    """Toglie dal corpo le righe di margine RIPETUTE (>=2 pagine), non i titoli di testa.
+
+    Non le butta: restituisce (testatina, piè di pagina) presi dalla prima pagina
+    in cui compaiono, che il writer docx rimette come header/footer Word (ripetuti
+    da Word su ogni pagina, come nell'originale). Un numero di pagina diventa un
+    paragrafo con ruolo "page_number": Word lo scrive col campo PAGE.
+    """
     if len(pages) < 2:
-        return
+        return [], []
     seen: dict[str, int] = {}
     for page in pages:
         keys = set()
@@ -1222,6 +1258,9 @@ def _drop_repeated_margins(pages: list[dict], page_height: float) -> None:
             seen[key] = seen.get(key, 0) + 1
     threshold = max(2, int(len(pages) * 0.8))
 
+    headers: list[Paragraph] = []
+    footers: list[Paragraph] = []
+    taken: set[str] = set()
     for page in pages:
         kept = []
         for line in page["lines"]:
@@ -1229,9 +1268,17 @@ def _drop_repeated_margins(pages: list[dict], page_height: float) -> None:
             in_band = top <= page_height * _MARGIN_BAND or line.y <= page_height * _MARGIN_BAND
             key = _normalise_margin_text(line.text)
             if in_band and key and seen.get(key, 0) >= threshold:
+                if key not in taken:
+                    taken.add(key)
+                    role = "page_number" if _PAGE_NUMBER_KEY_RE.match(key) else ""
+                    target = headers if top <= page_height * _MARGIN_BAND else footers
+                    target.append(Paragraph(lines=[line], role=role))
                 continue
             kept.append(line)
         page["lines"] = kept
+    headers.sort(key=lambda p: (-p.lines[0].y, p.lines[0].x))
+    footers.sort(key=lambda p: (-p.lines[0].y, p.lines[0].x))
+    return headers, footers
 
 
 # --- Lettura ---------------------------------------------------------------
@@ -1317,12 +1364,14 @@ def _ccitt_image(node) -> bytes | None:
 
 
 def _collect_page(layout, image_writer, tmp_dir: str) -> dict:
-    from pdfminer.layout import LTFigure, LTImage, LTLine, LTRect, LTTextLine
+    from pdfminer.layout import LTCurve, LTFigure, LTImage, LTLine, LTRect, LTTextLine
 
     lines: list[Line] = []
     rotated: list[Line] = []
     segments: list[tuple[str, tuple[float, float, float, float]]] = []
     images: list[ImageBlock] = []
+    # Riquadri pieni colorati (bande, box, celle evidenziate): (x0, y0, x1, y1, colore).
+    fills: list[tuple[float, float, float, float, str]] = []
 
     def walk(node) -> None:
         if isinstance(node, LTTextLine):
@@ -1351,6 +1400,11 @@ def _collect_page(layout, image_writer, tmp_dir: str) -> dict:
             except Exception:
                 pass   # immagine non estraibile (filtri esotici): si prosegue
             return
+        if isinstance(node, LTCurve) and not isinstance(node, LTLine):
+            color = _fill_color(node)
+            x0, y0, x1, y1 = node.bbox
+            if color and (x1 - x0) >= 6 and (y1 - y0) >= 6:
+                fills.append((x0, y0, x1, y1, color))
         if isinstance(node, (LTRect, LTLine)):
             segment = _rule_segment(node)
             if segment is not None:
@@ -1362,6 +1416,20 @@ def _collect_page(layout, image_writer, tmp_dir: str) -> dict:
                 walk(child)
 
     walk(layout)
+    # Solo ciò che sta DENTRO la pagina: un PDF che impagina una doppia pagina come
+    # due pagine (stesso contenuto, riquadri diversi) porta su ognuna anche il
+    # testo dell'altra metà, fuori dal foglio. Era testo invisibile duplicato.
+    px0, py0, px1, py1 = layout.bbox
+
+    def visible(x0: float, y0: float, x1: float, y1: float) -> bool:
+        cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+        return px0 - 2 <= cx <= px1 + 2 and py0 - 2 <= cy <= py1 + 2
+
+    lines = [ln for ln in lines if visible(ln.x, ln.y, ln.right, ln.top)]
+    rotated = [ln for ln in rotated if visible(ln.x, ln.y, ln.right, ln.top)]
+    images = [im for im in images if visible(im.x, im.y, im.right, im.top)]
+    fills = [f for f in fills if visible(*f[:4])]
+    segments = [sg for sg in segments if visible(*sg[1])]
     # Il testo ruotato (timbri "arXiv:...", filigrane, artefatti fuori pagina) non
     # fa parte del flusso di lettura: pdfminer lo spezza in un glifo per riga e
     # quei glifi finivano per fondersi con le righe di corpo (una cifra diventava
@@ -1369,7 +1437,7 @@ def _collect_page(layout, image_writer, tmp_dir: str) -> dict:
     # pagina non sia ruotata per intero: lì è l'unico testo disponibile.
     if not lines:
         lines = rotated
-    return {"lines": lines, "segments": segments, "images": images,
+    return {"lines": lines, "segments": segments, "images": images, "fills": fills,
             "width": layout.width, "height": layout.height}
 
 
@@ -1499,7 +1567,22 @@ def read_pdf(path: Path, *, use_ai: bool = True, progress=None, cancel=None) -> 
             # Form XObject (impaginati InDesign, report, moduli compilati): restava
             # LTChar sciolto e il lettore lo saltava. Su 4 PDF del corpus si
             # perdeva dal 20 al 97% del testo, in silenzio.
-            device = PDFPageAggregator(manager, laparams=LAParams(all_texts=True))
+            class _CountingAggregator(PDFPageAggregator):
+                """Conta i caratteri disegnati INVISIBILI (render mode 3): è il testo
+                OCR sopra una scansione. pdfminer non lo segnala sui caratteri."""
+
+                def begin_page(self, page, ctm):
+                    self.drawn = self.invisible = 0
+                    super().begin_page(page, ctm)
+
+                def render_string(self, textstate, seq, ncs, graphicstate):
+                    count = sum(len(item) for item in seq if isinstance(item, (bytes, str)))
+                    self.drawn += count
+                    if getattr(textstate, "render", 0) == 3:
+                        self.invisible += count
+                    super().render_string(textstate, seq, ncs, graphicstate)
+
+            device = _CountingAggregator(manager, laparams=LAParams(all_texts=True))
             interpreter = interpreter_class(manager, device)
             try:
                 with open(path, "rb") as handle:
@@ -1515,6 +1598,8 @@ def read_pdf(path: Path, *, use_ai: bool = True, progress=None, cancel=None) -> 
                             continue
                         collected = _collect_page(device.get_result(), writer, tmp_dir)
                         collected["index"] = index
+                        collected["ocr"] = (device.drawn > 20
+                                            and device.invisible > 0.6 * device.drawn)
                         collected["regions"] = _page_regions(layout_pages, index)
                         pages.append(collected)
                         if progress is not None:
@@ -1535,8 +1620,9 @@ def read_pdf(path: Path, *, use_ai: bool = True, progress=None, cancel=None) -> 
 
             page_width = max(p["width"] for p in pages) or 595.0
             page_height = max(p["height"] for p in pages) or 842.0
-            _drop_repeated_margins(pages, page_height)
+            headers, footers = _drop_repeated_margins(pages, page_height)
             document = _assemble(pages, page_width, page_height, layout_pages)
+            document.headers, document.footers = headers, footers
             document.skipped_pages = skipped
             document.undecoded_chars = _count_undecoded(document)
             document.ai_unavailable = ai_unavailable
@@ -1569,6 +1655,8 @@ def _assemble(pages: list[dict], page_width: float, page_height: float,
     text_left = min((ln.x for ln in all_lines), default=0.0)
     text_right = max((ln.right for ln in all_lines), default=page_width)
 
+    document.page_sizes = [(page["width"], page["height"]) for page in pages]
+    document.ocr_pages = [i for i, page in enumerate(pages) if page.get("ocr")]
     for page_index, page in enumerate(pages):
         lines = _merge_fragments(page["lines"])
         table_lines: set[int] = set()
@@ -1585,7 +1673,8 @@ def _assemble(pages: list[dict], page_width: float, page_height: float,
             page_blocks = _ai_page_blocks(page, lines, tables, ruled_lines, layout_pages,
                                           text_left, text_right)
             document.ai_pages += 1
-            if page_index > 0 and page_blocks:
+            _apply_fills(page_blocks, page.get("fills", []), page["width"] * page["height"])
+            if page_index > 0:
                 document.blocks.append(PageBreak())
             document.blocks.extend(page_blocks)
             continue
@@ -1610,7 +1699,10 @@ def _assemble(pages: list[dict], page_width: float, page_height: float,
         # Anche i blocchi (non solo le righe) vanno ordinati per colonne: un
         # sort per sola y mescolerebbe le due colonne di un PDF.
         page_blocks = _xy_cut([*paragraphs, *tables, *page["images"]])
-        if page_index > 0 and page_blocks:
+        _apply_fills(page_blocks, page.get("fills", []), page["width"] * page["height"])
+        # Un salto per OGNI pagina, anche vuota: il writer docx dà a ogni pagina
+        # la sua sezione (misure, margini), e una pagina bianca resta una pagina.
+        if page_index > 0:
             document.blocks.append(PageBreak())
         document.blocks.extend(page_blocks)
 
@@ -1661,6 +1753,57 @@ def _center_in(block, region, pad: float = 2.0) -> bool:
         cx, cy = block.x + block.width / 2, block.y + block.height / 2
     return (region.x0 - pad <= cx <= region.x1 + pad
             and region.y0 - pad <= cy <= region.y1 + pad)
+
+
+def _group_figures(regions, lines: list[Line]):
+    """Figure vicine (+ le etichette fra loro) → UNA figura.
+
+    Un diagramma con le sue didascalie interne ("Normal cells", "Lymph vessel")
+    arriva dal modello come tante immagini e tanti pezzetti di testo: scritti uno
+    per uno diventavano una griglia di frammenti che occupava due pagine. Si
+    ritaglia invece l'insieme, come appare sulla pagina. Solo se il testo che
+    finirebbe nel ritaglio è poco (etichette, non paragrafi)."""
+    figures = [r for r in regions if r.kind in ("image", "chart")]
+    if len(figures) < 2:
+        return regions
+    parent = list(range(len(figures)))
+
+    def find(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    pad = 20.0
+    for i, a in enumerate(figures):
+        for j in range(i + 1, len(figures)):
+            b = figures[j]
+            if (a.x0 - pad < b.x1 and b.x0 - pad < a.x1
+                    and a.y0 - pad < b.y1 and b.y0 - pad < a.y1):
+                parent[find(i)] = find(j)
+    groups: dict[int, list] = {}
+    for i, region in enumerate(figures):
+        groups.setdefault(find(i), []).append(region)
+    result = list(regions)
+    for members in groups.values():
+        if len(members) < 2:
+            continue
+        x0 = min(r.x0 for r in members)
+        y0 = min(r.y0 for r in members)
+        x1 = max(r.x1 for r in members)
+        y1 = max(r.y1 for r in members)
+        inside_text = sum(len(line.text.strip()) for line in lines
+                          if x0 <= line.x + line.width / 2 <= x1 and y0 <= line.y + line.height / 2 <= y1)
+        if inside_text > 400:
+            continue
+        labels = [r for r in result if r.kind not in _AI_FIGURES and r.area > 0
+                  and r.overlap(x0, y0, x1, y1) >= 0.9 * r.area]
+        merged = type(members[0])(kind="image", score=max(r.score for r in members),
+                                  x0=x0, y0=y0, x1=x1, y1=y1,
+                                  order=min(r.order for r in members))
+        result = [r for r in result if not any(r is m for m in members + labels)]
+        result.append(merged)
+    return result
 
 
 def _merge_formula_numbers(regions):
@@ -1844,10 +1987,15 @@ def _would_fit(prev: Line, line: Line, right: float) -> bool:
     riga un vuoto più largo della parola seguente; se lo lascia, la riga è finita
     lì apposta (elenco di righe, indirizzo, verso, voce di menu).
     """
-    if not line.words:
-        return False
-    first = line.words[0]
-    word = first[1] - first[0]
+    if line.words:
+        first = line.words[0]
+        word = first[1] - first[0]
+    else:
+        # Senza geometria delle parole: larghezza stimata (mezzo em per carattere).
+        token = line.text.strip().split(" ")[0] if line.text.strip() else ""
+        if not token:
+            return False
+        word = 0.5 * max(line.size, 6.0) * len(token)
     room = right - prev.right
     space = 0.3 * max(prev.size, line.size, 6.0)
     return room > word + space + 2.0
@@ -1950,6 +2098,7 @@ def _ai_page_blocks(page: dict, lines: list[Line], ruled: list[Table],
     """
     regions = _merge_formula_numbers(
         [region for region in page["regions"] if region.kind not in _AI_IGNORED])
+    regions = _group_figures(regions, lines)
     regions.sort(key=lambda region: region.order)
 
     used_by_ruled: set[int] = set()
@@ -1989,7 +2138,13 @@ def _ai_page_blocks(page: dict, lines: list[Line], ruled: list[Table],
         target = next((i for i, region in enumerate(regions)
                        if region.kind in _AI_FIGURES and _center_in(image, region)), None)
         if target is None:
-            leftovers.append(image)
+            try:
+                hidden = layout_pages is not None and layout_pages.looks_blank(
+                    page["index"], image.x, image.y, image.right, image.top)
+            except Exception:
+                hidden = False
+            if not hidden:          # un'immagine che la pagina non mostra non va nel documento
+                leftovers.append(image)
         else:
             region_images[target].append(image)
 
@@ -2100,6 +2255,45 @@ def _ai_page_blocks(page: dict, lines: list[Line], ruled: list[Table],
 
     placed.sort(key=lambda item: item[0])
     return [block for _position, block in placed]
+
+
+def _apply_fills(blocks: list, fills, page_area: float) -> None:
+    """Riquadri colorati del PDF → ombreggiatura di paragrafi e celle.
+
+    Vale il riquadro più piccolo che contiene il centro del testo; uno sfondo
+    che copre quasi tutta la pagina non è un riquadro (è il colore della pagina)."""
+    boxes = [f for f in fills if (f[2] - f[0]) * (f[3] - f[1]) < 0.85 * page_area]
+    if not boxes:
+        return
+
+    def color_at(x: float, y: float) -> str:
+        inside = [f for f in boxes if f[0] - 1 <= x <= f[2] + 1 and f[1] - 1 <= y <= f[3] + 1]
+        if not inside:
+            return ""
+        return min(inside, key=lambda f: (f[2] - f[0]) * (f[3] - f[1]))[4]
+
+    def shade(paragraph: Paragraph) -> None:
+        if not paragraph.lines:
+            return
+        colors = {color_at(line.x + line.width / 2, line.y + line.height / 2)
+                  for line in paragraph.lines}
+        if len(colors) == 1:
+            paragraph.shading = colors.pop()
+
+    for block in blocks:
+        if isinstance(block, Paragraph):
+            shade(block)
+        elif isinstance(block, ListBlock):
+            for item in block.items:
+                shade(item.paragraph)
+        elif isinstance(block, Table):
+            for row in block.rows:
+                for cell in row:
+                    centers = [(line.x + line.width / 2, line.y + line.height / 2)
+                               for p in cell.paragraphs for line in p.lines]
+                    colors = {color_at(x, y) for x, y in centers}
+                    if len(colors) == 1 and centers:
+                        cell.shading = colors.pop()
 
 
 def _classify_headings(document: Document) -> None:
