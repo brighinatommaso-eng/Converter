@@ -318,9 +318,12 @@ jobs:
           dpkg-deb --info dist/converter_*_amd64.deb
 
       - name: .deb round-trip (install, selftest, remove)
-        timeout-minutes: 15
+        timeout-minutes: 25
         run: |
-          sudo apt-get install -y -q ./dist/converter_*_amd64.deb
+          # Solo le dipendenze vere: con i "Recommends" ffmpeg tira dentro driver VA,
+          # pocketsphinx (27 MB)… e da un mirror lento il passo andava in timeout.
+          sudo apt-get install -y -q --no-install-recommends -o Acquire::Retries=3 \
+            ./dist/converter_*_amd64.deb
           test -x /usr/bin/converter
           desktop-file-validate /usr/share/applications/converter.desktop
           report="$RUNNER_TEMP/selftest-deb.txt"
