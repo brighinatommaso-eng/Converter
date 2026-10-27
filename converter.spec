@@ -57,9 +57,9 @@ for _tool in ("ffmpeg", "ffprobe"):
     _p = _real_tool(_tool)
     if _p:
         _bundled_tools.append(_p)
-# ffmpeg "shared" (build ufficiale gyan.dev full-shared): ffmpeg.exe e ffprobe.exe
-# sono piccoli e condividono le DLL avcodec/avformat/... accanto a loro. Una copia
-# sola delle librerie invece di due exe statici da ~150 MB l'uno.
+# ffmpeg "shared" (es. gyan.dev full-shared): ffmpeg.exe e ffprobe.exe sono piccoli
+# e condividono le DLL avcodec/avformat/... accanto a loro, che vanno copiate anche
+# loro. Con una build statica (la "essentials" della release) non ce ne sono.
 _ffmpeg_dir = os.path.dirname(_bundled_tools[0]) if _bundled_tools and \
     os.path.basename(_bundled_tools[0]).lower().startswith("ffmpeg") else None
 _SHARED_FFMPEG_LIBS = ("avcodec", "avformat", "avutil", "avfilter", "avdevice",

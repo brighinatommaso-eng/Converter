@@ -77,15 +77,17 @@ jobs:
           $ProgressPreference = "SilentlyContinue"   # la barra di progresso rallenta i download
           $tools = Join-Path $env:RUNNER_TEMP "tools"
           New-Item -ItemType Directory -Force $tools | Out-Null
-          # Build "full-shared" di gyan.dev: stessi codec della "full" di winget
-          # Gyan.FFmpeg, ma ffmpeg.exe e ffprobe.exe condividono le DLL invece di
-          # contenerle due volte (~200 MB in meno). L'hash pubblicato viene verificato.
+          # Build "essentials" di gyan.dev: solo i codec comuni (x264, x265, vpx, lame,
+          # opus, vorbis, libass...), senza le decine di librerie della "full" che l'app
+          # non usa. Il passo "ffmpeg codecs" sotto fallisce se ne manca uno che serve.
+          # L'hash pubblicato viene verificato.
+          $build = "ffmpeg-release-essentials.7z"
           $base = "https://www.gyan.dev/ffmpeg/builds"
           $archive = Join-Path $tools "ffmpeg.7z"
           for ($i = 1; $i -le 3; $i++) {
             try {
-              Invoke-WebRequest "$base/ffmpeg-release-full-shared.7z" -OutFile $archive -TimeoutSec 240
-              $expected = (Invoke-WebRequest "$base/ffmpeg-release-full-shared.7z.sha256" -TimeoutSec 60).Content.Trim().Split()[0]
+              Invoke-WebRequest "$base/$build" -OutFile $archive -TimeoutSec 240
+              $expected = (Invoke-WebRequest "$base/$build.sha256" -TimeoutSec 60).Content.Trim().Split()[0]
               break
             } catch {
               Write-Host "tentativo $i fallito: $_"
@@ -100,6 +102,31 @@ jobs:
           $ffbin = (Get-ChildItem "$tools\ffmpeg" -Recurse -Filter ffmpeg.exe | Select-Object -First 1).DirectoryName
           if (-not $ffbin) { throw "ffmpeg.exe non trovato nell'archivio" }
           $ffbin >> $env:GITHUB_PATH
+
+      # Ogni encoder, muxer e filtro che i convertitori chiedono a ffmpeg: una build
+      # più piccola non deve mai togliere in silenzio un formato.
+      - name: ffmpeg codecs
+        run: |
+          $enc = (ffmpeg -hide_banner -encoders) -join "`n"
+          $mux = (ffmpeg -hide_banner -muxers) -join "`n"
+          $flt = (ffmpeg -hide_banner -filters) -join "`n"
+          $missing = @()
+          foreach ($e in "libx264","libx265","libvpx-vp9","aac","libmp3lame","libopus","libvorbis",
+                         "flac","alac","gif","mov_text","webvtt","srt","ass",
+                         "pcm_s16le","pcm_s24le","pcm_s32le","pcm_f32le","pcm_f64le","pcm_u8") {
+            if ($enc -notmatch "(?m)^\s\S{6}\s$([regex]::Escape($e))\s") { $missing += "encoder $e" }
+          }
+          foreach ($m in "mp4","mov","matroska","webm","avi","gif","mp3","ogg","opus","flac","wav","ipod","adts") {
+            if ($mux -notmatch "(?m)^\s+\S+\s+$([regex]::Escape($m))[\s,]") { $missing += "muxer $m" }
+          }
+          foreach ($f in "loudnorm","palettegen","paletteuse","scale","fps","split","subtitles") {
+            if ($flt -notmatch "(?m)^\s+\S+\s+$([regex]::Escape($f))\s") { $missing += "filter $f" }
+          }
+          if ($missing) { throw ("ffmpeg senza: " + ($missing -join ", ")) }
+          "ffmpeg: tutti gli encoder, muxer e filtri usati dall'app ci sono"
+          $dir = Split-Path (Get-Command ffmpeg).Source
+          $mb = [math]::Round(((Get-ChildItem $dir -File | Measure-Object Length -Sum).Sum / 1MB), 1)
+          "dimensione di bin/ ffmpeg: $mb MB"
 
       - name: Inno Setup
         timeout-minutes: 10
