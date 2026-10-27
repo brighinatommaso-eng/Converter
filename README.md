@@ -52,22 +52,26 @@ Notes:
 
 ## Download (Windows)
 
-Grab the latest archive from the
-**[Releases page](https://github.com/brighinatommaso-eng/Converter/releases)**:
-`Converter-v0.1.3-windows.zip`.
+Grab the latest release from the
+**[Releases page](https://github.com/brighinatommaso-eng/Converter/releases)**.
+Two downloads, same app:
 
-1. Download and **extract the whole zip** to a folder (don't run it from inside the
-   archive). You should see `Converter.exe` next to an `_internal` folder.
-2. Run **`Converter.exe`**.
+- **`Converter-vX.Y.Z-setup.exe`** (installer): run it and follow the steps. It adds
+  Converter to the Start menu (and optionally the desktop) and can be removed from
+  *Settings → Apps*. By default it installs for your user only, so it needs no
+  administrator rights. Updating means running the new installer over the old one.
+- **`Converter-vX.Y.Z-windows.zip`** (portable): **extract the whole zip** to a
+  folder (don't run it from inside the archive) and run **`Converter.exe`**. You
+  should see it next to an `_internal` folder.
 
 > **Windows SmartScreen:** the executable is **not code-signed**, so the first run
 > may show a blue "Windows protected your PC" dialog. Click **More info → Run
 > anyway**. (The app is open source; you can also run it from source, below.)
 
-The **SHA256 checksum** of the zip is published in the **release notes** on the
-[Releases page](https://github.com/brighinatommaso-eng/Converter/releases).
+The **SHA256 checksums** of both files are in the release notes and in
+`SHA256SUMS.txt`, attached to every release.
 
-The archive also includes `LICENSE`, `THIRD_PARTY_NOTICES.md` and a `licenses/`
+Both include `LICENSE`, `THIRD_PARTY_NOTICES.md` and a `licenses/`
 folder with the third-party license texts (ffmpeg, pandoc).
 
 ## External tools
