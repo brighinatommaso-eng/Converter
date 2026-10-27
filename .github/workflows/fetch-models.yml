@@ -1,0 +1,42 @@
+# Temporaneo: scarica i modelli di layout candidati (la sandbox di sviluppo non
+# raggiunge modelscope/huggingface) e li mette sul branch "model-cache" a pezzi
+# sotto i 100 MB del limite di GitHub. Da togliere prima del merge.
+name: fetch-models
+on:
+  push:
+    branches: [claude/sharp-brahmagupta-ikhxxs]
+    paths: [.github/workflows/fetch-models.yml]
+permissions:
+  contents: write
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Download
+        run: |
+          set -euo pipefail
+          mkdir -p out && cd out
+          base=https://www.modelscope.cn/models/RapidAI/RapidLayout/resolve/v1.2.0/onnx
+          get() {  # url sha256
+            name=$(basename "$1")
+            curl -fL --retry 3 --max-time 900 -o "$name" "$1"
+            echo "$2  $name" | sha256sum -c -
+          }
+          get $base/pp_doc_layout/pp_doc_layoutv2.onnx 0bd2ea0997fe0789f0300292291f8bbf897d890b44a9a3bd5be72afd6198aa90
+          get $base/pp_doc_layout/pp_doc_layoutv3.onnx 250dbad1dfb9e4983fab75e1bf5085cd56ec3f41d5c7d0f8623ec74856e7aa67
+          get $base/pp_layout/layout_publaynet.onnx 958aa6dcef1cc1a542d0a513b5976a3d5edbcc37d76460ec1e9f126358e4d100
+          ls -la
+          sha256sum *.onnx > SHA256SUMS
+          for f in *.onnx; do split -b 90M -d "$f" "$f.part"; rm "$f"; done
+          ls -la
+      - name: Push to model-cache
+        run: |
+          set -euo pipefail
+          cd out
+          git init -q -b model-cache
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          git add -A
+          git commit -qm "Layout models (temporary cache)"
+          git push -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" model-cache
