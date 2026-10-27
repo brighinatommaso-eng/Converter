@@ -3,7 +3,7 @@
 # Linux: suite completa con ffmpeg, pandoc e LibreOffice installati (i test che
 # li richiedono non vengono saltati). Windows: la stessa suite senza tool esterni,
 # per i problemi di percorsi/encoding/Qt che si vedono solo lì. La build
-# PyInstaller + selftest dell'exe sta in build-windows.yml.
+# PyInstaller, pacchetti e selftest degli eseguibili stanno in build.yml.
 name: CI
 
 on:

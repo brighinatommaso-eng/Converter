@@ -428,9 +428,10 @@ def _selftest_honesty_checks(d, ff, gen_media) -> dict[str, object]:
     def app_icon():
         # Sul file .exe l'icona la incorpora PyInstaller; quella di finestra e
         # taskbar la carica Qt a runtime: se è vuota Windows mostra quella generica.
-        from PySide6.QtGui import QGuiApplication
+        # QApplication (non solo QGuiApplication): il controllo dopo crea dei widget.
+        from PySide6.QtWidgets import QApplication
 
-        _app = QGuiApplication.instance() or QGuiApplication([sys.argv[0]])  # noqa: F841
+        _app = QApplication.instance() or QApplication([sys.argv[0]])  # noqa: F841
         from converter.gui.app import _app_icon
 
         icon = _app_icon()
@@ -440,6 +441,36 @@ def _selftest_honesty_checks(d, ff, gen_media) -> dict[str, object]:
         return True
 
     check("window/taskbar icon loads", app_icon)
+
+    # --- La finestra principale si costruisce col Qt ridotto del bundle ---------
+    def main_window():
+        # Il bundle toglie i pezzi di Qt che l'app non usa (Quick/Qml/Pdf, tastiera
+        # virtuale, traduzioni, OpenGL software): la finestra vera deve nascere lo stesso.
+        from PySide6.QtWidgets import QApplication
+
+        _app = QApplication.instance() or QApplication([sys.argv[0]])  # noqa: F841
+        from converter.gui.main_window import MainWindow
+        from converter.gui.theme import apply_theme
+
+        apply_theme(_app)
+        window = MainWindow()
+        ok = window.centralWidget() is not None
+        window.deleteLater()
+        return True if ok else "FAIL no central widget"
+
+    check("main window builds", main_window)
+
+    def no_unused_qt():
+        if not getattr(sys, "frozen", False):
+            return "SKIP not frozen"
+        from pathlib import Path
+
+        base = Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent))
+        found = sorted({p.name for p in base.rglob("*")
+                        if p.suffix == ".qm" or any(m in p.name for m in _UNUSED_QT_MARKERS)})
+        return True if not found else f"FAIL bundled anyway: {found[:8]}"
+
+    check("bundle free of unused Qt parts", no_unused_qt)
     return out
 
 
@@ -449,6 +480,15 @@ _UNUSED_OPTIONAL_MODULES = (
     "pydantic_core", "rich", "jinja2", "markupsafe", "fsspec", "anyio", "pygments", "bcrypt",
     "requests", "urllib3", "certifi", "pyglet", "networkx", "shapely", "rtree", "psutil",
     "pkg_resources", "setuptools",
+)
+
+
+# Pezzi di Qt tolti dal bundle (converter.spec, UNUSED_QT_MARKERS): l'app usa solo
+# QtCore/QtGui/QtWidgets. Stesso elenco dello spec, verificato da un test.
+# Le traduzioni (.qm) non servono: l'app non carica nessun QTranslator.
+_UNUSED_QT_MARKERS = (
+    "Qt6Quick", "Qt6Qml", "Qt6Pdf", "Qt6VirtualKeyboard", "qtvirtualkeyboard", "qpdf",
+    "opengl32sw",
 )
 
 

@@ -1,13 +1,13 @@
 # Release notes
 
-One file per version: `v<version>.md` (for example `v0.1.4.md`). The Windows
-build workflow (`.github/workflows/build-windows.yml`) uses it as the body of the
+One file per version: `v<version>.md` (for example `v0.1.4.md`). The build
+workflow (`.github/workflows/build.yml`) uses it as the body of the
 draft release it creates when the tag `v<version>` is pushed; a tag without its
 notes file fails the build.
 
 - An optional first line `# Title` becomes the release title (otherwise `v<version>`).
 - Don't write the checksums: the workflow appends a "Verify the download" section
-  with the SHA256 of the zip and of the installer (an existing section with that
+  with the SHA256 of every file (Windows zip and installer, Linux AppImage and .deb) (an existing section with that
   title is replaced).
 
 Release steps:

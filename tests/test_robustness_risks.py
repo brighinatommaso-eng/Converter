@@ -180,3 +180,21 @@ def test_spec_and_selftest_agree_on_the_excluded_modules():
     # Nessun modulo usato davvero da Converter tra gli esclusi.
     assert not {"pdfminer", "docx", "lxml", "PIL", "pandas", "numpy", "trimesh",
                 "cryptography", "yaml", "openpyxl", "odf"} & set(spec_list)
+
+
+def test_spec_and_selftest_agree_on_the_removed_qt_parts():
+    """Lo spec toglie i pezzi Qt non usati e il selftest dell'exe ne verifica l'assenza."""
+    import ast
+
+    import converter_app
+
+    root = Path(__file__).resolve().parent.parent
+    tree = ast.parse((root / "converter.spec").read_text(encoding="utf-8"))
+    spec_list = next(ast.literal_eval(node.value) for node in ast.walk(tree)
+                     if isinstance(node, ast.Assign)
+                     and getattr(node.targets[0], "id", "") == "UNUSED_QT_MARKERS")
+    assert tuple(spec_list) == converter_app._UNUSED_QT_MARKERS
+    # I moduli Qt che l'app importa davvero non devono mai finire tra i tolti.
+    for used in ("Qt6Core", "Qt6Gui", "Qt6Widgets", "QtCore", "QtGui", "QtWidgets"):
+        assert not any(marker in used for marker in spec_list), used
+

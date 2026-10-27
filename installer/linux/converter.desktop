@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Converter
+GenericName=File Converter
+Comment=Convert files offline, honest about quality
+Exec=converter
+Icon=converter
+Terminal=false
+Categories=Utility;
+Keywords=convert;converter;pdf;docx;image;audio;video;3d;
+StartupWMClass=Converter
