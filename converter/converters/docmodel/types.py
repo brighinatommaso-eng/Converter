@@ -131,6 +131,10 @@ class Paragraph:
     indent_pt: float = 0.0       # rientro della prima riga rispetto al margine
     space_before_pt: float = 0.0
     space_after_pt: float = 0.0
+    # Ruolo deciso dall'analisi AI del layout: "title"/"heading" (regione titolo),
+    # "body" (paragrafo di una regione di testo: mai un titolo), "" = lo decide
+    # l'euristica dei corpi.
+    role: str = ""
 
     @property
     def text(self) -> str:
@@ -345,6 +349,12 @@ class Document:
     # Caratteri che il PDF non permette di decodificare (font senza mappa
     # Unicode): resi con U+FFFD "�" e dichiarati nel verdetto.
     undecoded_chars: int = 0
+    # Analisi del layout: pagine ricostruite dal modello AI e pagine rimaste al
+    # motore euristico (modello assente, pagina ruotata, errore). Il verdetto lo
+    # dichiara: le due strade non danno la stessa qualità.
+    ai_pages: int = 0
+    heuristic_pages: int = 0
+    ai_unavailable: str = ""
 
     def body_size(self) -> float:
         """Dimensione più diffusa, pesata sui caratteri: è il "testo normale"."""

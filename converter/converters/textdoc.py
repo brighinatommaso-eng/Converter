@@ -9,11 +9,13 @@ Le altre direzioni restano ai motori che le fanno già bene (LibreOffice per
 office↔office e docx→html con i colori, il motore markup per md/html/txt→office). Il
 registry sceglie per priorità, quindi qui si rivendicano SOLO queste coppie.
 
-Perché è un converter e non "un modello AI": un LLM non aggiunge struttura a un
-PDF, la INFERISCE in modo non riproducibile. La struttura (titoli, liste,
-tabelle, ordine di lettura) si ricostruisce deterministicamente dalla geometria
-(pdfminer, MIT) e si riversa su ogni formato dallo stesso IR. Il punto d'innesto
-per un'eventuale rifinitura AI resta `docmodel` (Document in → Document out).
+AI locale, non generativa: il testo viene SEMPRE dal PDF (pdfminer, MIT); un
+modello di rilevamento del layout (PP-DocLayoutV2, Apache-2.0, offline via
+onnxruntime) guarda la pagina renderizzata e dice dove sono titoli, paragrafi,
+tabelle, figure e in che ordine si leggono (`docmodel.layout_ai`). Non inventa né
+riscrive parole, e a parità di file dà sempre lo stesso risultato. Senza modello
+(o su una pagina che non sa analizzare) resta il motore geometrico, e il verdetto
+lo dice.
 
 Licenza: niente PyMuPDF/pdf2docx (AGPL, esclusi dal bundle). python-docx è MIT e
 diventa una dipendenza diretta: è lo scrittore/lettore docx del motore.
@@ -36,6 +38,7 @@ from ..core.registry import register
 from . import _ocr
 from ._libreoffice import DEFAULT_TIMEOUT, run_convert
 from .docmodel import PageBreak, read_docx, read_pdf, write_docx, write_html, write_markdown, write_text
+from .docmodel.pdfreader import ReadCancelled
 from .docmodel.writers import WriteReport
 
 # Target di questo converter. `pdf` come target resta a LibreOffice (export fedele
@@ -129,8 +132,9 @@ class TextDocConverter(Converter):
                     "reflow the text.")
             if dst == "docx":
                 return lossy(
-                    "PDF has no structural text model: headings, paragraphs, lists and tables "
-                    "are inferred from the page geometry. Fonts, sizes and colours are carried "
+                    "PDF has no structural text model: headings, paragraphs, lists, tables and "
+                    "figures are detected by a local AI layout model and the page geometry (the "
+                    "words themselves come from the PDF). Fonts, sizes and colours are carried "
                     "over, so the result is editable and visually close — but absolutely "
                     "positioned elements (text boxes, overlapping graphics) are not reproduced.")
             if dst == "md":
@@ -213,8 +217,16 @@ class TextDocConverter(Converter):
                     if job.cancel.cancelled:
                         return cancelled_result()
                 progress(ProgressEvent(0.4, "Reconstructing the document…"))
+
+                def page_done(done: int, total: int) -> None:
+                    progress(ProgressEvent(0.4 + 0.35 * done / max(total, 1),
+                                           f"Analysing page {done} of {total}…"))
+
                 try:
-                    document = read_pdf(source)
+                    document = read_pdf(source, progress=page_done,
+                                        cancel=lambda: job.cancel.cancelled)
+                except ReadCancelled:
+                    return cancelled_result()
                 except ValueError as exc:
                     return ConversionResult(ok=False, error=str(exc))
                 if not any(not isinstance(block, PageBreak) for block in document.blocks):
@@ -245,6 +257,8 @@ class TextDocConverter(Converter):
         size = job.output_path.stat().st_size
         progress(ProgressEvent(1.0, "Done"))
         verdict = self.verdict(job.src_format, job.dst_format, options)
+        if job.src_format == "pdf":
+            verdict = _layout_note(verdict, document)
         if document.skipped_pages:
             # PDF danneggiato: il resto è stato letto, ma quelle pagine mancano.
             verdict = lossy(f"{verdict.reason} {document.skipped_pages} damaged page(s) could "
@@ -280,3 +294,17 @@ class TextDocConverter(Converter):
             raise RuntimeError(payload)
         shutil.move(str(payload), str(job.output_path))
         return report
+
+
+def _layout_note(verdict: QualityVerdict, document) -> QualityVerdict:
+    """Dice nel verdetto se e dove il layout NON è stato analizzato dal modello AI."""
+    if document.ai_unavailable:
+        return lossy(f"{verdict.reason} AI layout analysis was not used "
+                     f"({document.ai_unavailable}): the layout was rebuilt from the page "
+                     f"geometry only, which is less accurate on columns, tables and figures.")
+    if document.heuristic_pages:
+        return lossy(f"{verdict.reason} {document.heuristic_pages} page(s) could not be "
+                     f"analysed by the AI layout model (e.g. rotated pages) and were rebuilt "
+                     f"from the page geometry only.")
+    return verdict
+

@@ -45,6 +45,7 @@ include = ["converter*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = ["layout_ai: test of the AI layout analysis (runs with the model when it is installed)"]
 
 [tool.ruff]
 line-length = 120
