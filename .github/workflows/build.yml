@@ -155,7 +155,16 @@ jobs:
           else { "::warning::LibreOffice non installato: il selftest salta i controlli della modalità FULL" }
           exit 0   # pipe chiusa da Select-Object: il codice d'uscita di ffmpeg qui non conta
 
+      - uses: actions/cache@v4
+        with:
+          path: models
+          key: layout-model-0bd2ea0997fe0789
+      - name: AI layout model
+        run: python installer/fetch_layout_model.py
+
       - name: PyInstaller
+        env:
+          CONVERTER_REQUIRE_LAYOUT_MODEL: "1"
         run: |
           pyinstaller converter.spec --noconfirm --clean
           if ($LASTEXITCODE -ne 0) { throw "pyinstaller fallito" }
@@ -291,7 +300,16 @@ jobs:
               exit 1
             }
 
+      - uses: actions/cache@v4
+        with:
+          path: models
+          key: layout-model-0bd2ea0997fe0789
+      - name: AI layout model
+        run: python installer/fetch_layout_model.py
+
       - name: PyInstaller (AppImage, ffmpeg bundled)
+        env:
+          CONVERTER_REQUIRE_LAYOUT_MODEL: "1"
         run: |
           PATH="$TOOLS_BIN:$PATH" pyinstaller converter.spec --noconfirm --clean \
             --distpath dist-appimage --workpath build-appimage
@@ -303,6 +321,8 @@ jobs:
             awk '{ printf "%8.1f MB  %s\n", $1 / 1048576, $2 }'
 
       - name: PyInstaller (.deb, system ffmpeg)
+        env:
+          CONVERTER_REQUIRE_LAYOUT_MODEL: "1"
         run: |
           CONVERTER_BUNDLE_TOOLS=0 pyinstaller converter.spec --noconfirm --clean \
             --distpath dist-deb --workpath build-deb

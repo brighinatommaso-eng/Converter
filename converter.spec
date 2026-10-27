@@ -105,6 +105,10 @@ hiddenimports += collect_submodules("trimesh")
 # tutti costa poco ed evita un "No module named" solo nell'exe.
 hiddenimports += collect_submodules("markdown_it") + collect_submodules("mdurl")
 hiddenimports += collect_submodules("odf")
+# Analisi AI del layout PDF: onnxruntime e pypdfium2 sono importati solo dentro le
+# funzioni di docmodel.layout_ai; i loro hook (pyinstaller-hooks-contrib) portano le
+# librerie native (onnxruntime_pybind11_state, pdfium).
+hiddenimports += ["onnxruntime", "pypdfium2", "pypdfium2_raw"]
 
 a = Analysis(
     # Entry con import ASSOLUTO: __main__.py usa import relativi che PyInstaller
@@ -165,6 +169,20 @@ print(f"[converter.spec] Qt non usato tolto dal bundle: {len(_dropped)} file")
 
 # Tool esterni -> _internal/bin, copiati senza analisi delle dipendenze (vedi sopra).
 a.datas += [(f"bin/{os.path.basename(_p)}", _p, "DATA") for _p in _bundled_tools + _ffmpeg_libs]
+
+# Modello AI di layout (PP-DocLayoutV2, Apache-2.0) -> _internal/models. Non è su
+# PyPI: la build di release lo scarica in models/ (hash verificato). Con
+# CONVERTER_REQUIRE_LAYOUT_MODEL=1 la sua assenza ferma la build, invece di
+# produrre in silenzio un'app che legge i PDF senza AI.
+_layout_model = os.path.realpath(os.environ.get("CONVERTER_LAYOUT_MODEL")
+                                 or os.path.join("models", "pp_doc_layoutv2.onnx"))
+if os.path.isfile(_layout_model):
+    a.datas += [("models/pp_doc_layoutv2.onnx", _layout_model, "DATA")]
+    print(f"[converter.spec] modello di layout incluso: {_layout_model}")
+elif os.environ.get("CONVERTER_REQUIRE_LAYOUT_MODEL") == "1":
+    raise SystemExit(f"[converter.spec] modello di layout mancante: {_layout_model}")
+else:
+    print("[converter.spec] ATTENZIONE: modello di layout assente, PDF senza analisi AI")
 
 pyz = PYZ(a.pure)
 

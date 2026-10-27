@@ -250,6 +250,17 @@ def report() -> dict[str, DependencyStatus]:
             False, "OCRmyPDF was not found.", "pip install ocrmypdf"
         )
 
+    from ..converters.docmodel import layout_ai
+
+    reason = layout_ai.unavailable_reason()
+    if reason is None or reason == "AI layout analysis is turned off.":
+        items["AI layout model (PDF)"] = DependencyStatus(True)
+    else:
+        items["AI layout model (PDF)"] = DependencyStatus(
+            False, f"PDF pages are rebuilt without the AI layout model: {reason}.",
+            "Reinstall Converter, or put pp_doc_layoutv2.onnx in a 'models' folder "
+            "next to the program.")
+
     for label, mod, pip_name in [
         ("HEIC support (pillow-heif)", "pillow_heif", "pillow-heif"),
         ("AVIF support (pillow-avif)", "pillow_avif", "pillow-avif-plugin"),

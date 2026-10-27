@@ -179,6 +179,7 @@ def _selftest(out_path: str | None) -> int:
     # ritorno da html/epub/odt. Controlla il contenuto, non solo ok=True: un
     # modulo mancante nel bundle (markdown_it, odf) farebbe fallire qui.
     results.update(_selftest_markup(d))
+    results.update(_selftest_layout_ai(d))
 
     # rtf -> txt (striprtf)
     if has_striprtf:
@@ -278,6 +279,72 @@ def _selftest(out_path: str | None) -> int:
         sys.stdout.write(text)
     shutil.rmtree(d, ignore_errors=True)  # non lasciare la tmpdir a disco
     return 0 if ok else 1
+
+
+def _article_pdf(path) -> None:
+    """Pagina "da articolo" (titolo, sezione, paragrafi giustificati) per il modello AI:
+    una riga sola non basta, il modello deve vedere blocchi di testo veri."""
+    words = ("the method reads every page and rebuilds titles paragraphs tables and "
+             "figures in the order a person would read them").split()
+    parts = ["BT /F1 22 Tf 72 720 Td (Layout analysis selftest) Tj ET",
+             "BT /F1 14 Tf 72 680 Td (1 Introduction) Tj ET"]
+    y = 655
+    for paragraph in range(3):
+        for line in range(6):
+            text = " ".join(words[(line * 5 + paragraph) % 7:][:11])
+            parts.append(f"BT /F1 11 Tf 72 {y} Td ({text}) Tj ET")
+            y -= 14
+        y -= 12
+    stream = "\n".join(parts).encode("latin-1")
+    objs = [b"<< /Type /Catalog /Pages 2 0 R >>",
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+            b"/Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>",
+            b"<< /Length " + str(len(stream)).encode() + b" >>\nstream\n" + stream + b"\nendstream",
+            b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"]
+    out = bytearray(b"%PDF-1.4\n")
+    offsets = []
+    for i, body in enumerate(objs, start=1):
+        offsets.append(len(out))
+        out += str(i).encode() + b" 0 obj\n" + body + b"\nendobj\n"
+    xref_pos = len(out)
+    out += b"xref\n0 " + str(len(objs) + 1).encode() + b"\n0000000000 65535 f \n"
+    out += b"".join(f"{off:010d} 00000 n \n".encode() for off in offsets)
+    out += (b"trailer\n<< /Size " + str(len(objs) + 1).encode() + b" /Root 1 0 R >>\n"
+            b"startxref\n" + str(xref_pos).encode() + b"\n%%EOF")
+    path.write_bytes(bytes(out))
+
+
+def _selftest_layout_ai(d) -> dict[str, object]:
+    """Analisi AI del layout PDF nell'exe: modello presente, onnxruntime e PDFium
+    caricati (librerie native nel bundle) e una pagina davvero analizzata.
+
+    Nell'exe il modello DEVE esserci (la build lo include); da sorgente, senza
+    modello scaricato, i controlli sono SKIP."""
+    from converter.converters.docmodel import layout_ai, read_pdf
+
+    results: dict[str, object] = {}
+    reason = layout_ai.unavailable_reason()
+    if reason is not None and not getattr(sys, "frozen", False):
+        results["pdf layout AI model loads"] = f"SKIP {reason}"
+        results["pdf layout AI analyses a page"] = "SKIP no model"
+        return results
+    try:
+        results["pdf layout AI model loads"] = (
+            True if layout_ai.get_analyzer() is not None
+            else f"FAIL {layout_ai.unavailable_reason()}")
+    except Exception as e:  # noqa: BLE001
+        results["pdf layout AI model loads"] = f"ERR {type(e).__name__}: {e}"
+    try:
+        pdf = d / "article.pdf"
+        _article_pdf(pdf)
+        document = read_pdf(pdf)
+        results["pdf layout AI analyses a page"] = (
+            True if document.ai_pages == 1 and not document.ai_unavailable
+            else f"FAIL ai_pages={document.ai_pages} {document.ai_unavailable}")
+    except Exception as e:  # noqa: BLE001
+        results["pdf layout AI analyses a page"] = f"ERR {type(e).__name__}: {e}"
+    return results
 
 
 def _selftest_markup(d) -> dict[str, object]:

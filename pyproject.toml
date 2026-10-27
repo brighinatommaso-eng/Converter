@@ -25,6 +25,8 @@ dependencies = [
     "striprtf>=0.0.26",
     "trimesh>=4.0",
     "markdown-it-py>=3.0",
+    "onnxruntime>=1.17",
+    "pypdfium2>=4.20",
 ]
 
 [project.optional-dependencies]
