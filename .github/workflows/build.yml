@@ -115,7 +115,9 @@ jobs:
         timeout-minutes: 15
         continue-on-error: true
         run: |
-          choco install libreoffice-fresh -y --no-progress
+          # choco si ferma da solo prima del limite del passo: così non resta un
+          # msiexec orfano a metà installazione mentre i passi dopo lavorano.
+          choco install libreoffice-fresh -y --no-progress --execution-timeout 720
           if ($LASTEXITCODE -ne 0) { throw "choco install libreoffice-fresh fallito" }
 
       - name: Tool versions
@@ -252,7 +254,15 @@ jobs:
       - name: LibreOffice (best-effort)
         timeout-minutes: 15
         continue-on-error: true
-        run: sudo apt-get install -y -q --no-install-recommends libreoffice-writer
+        run: |
+          # Il limite va DENTRO il passo: allo scadere di timeout-minutes GitHub chiude
+          # la shell ma apt-get resta vivo e tiene il lock di dpkg, e il .deb poi non si
+          # installava ("Could not get lock /var/lib/dpkg/lock-frontend").
+          sudo timeout --kill-after=30s 12m apt-get install -y -q --no-install-recommends \
+            -o Acquire::Retries=3 libreoffice-writer || {
+              sudo dpkg --configure -a || true
+              exit 1
+            }
 
       - name: PyInstaller (AppImage, ffmpeg bundled)
         run: |
@@ -322,8 +332,11 @@ jobs:
         run: |
           # Solo le dipendenze vere: con i "Recommends" ffmpeg tira dentro driver VA,
           # pocketsphinx (27 MB)… e da un mirror lento il passo andava in timeout.
+          # Un'installazione interrotta prima (LibreOffice best-effort) va chiusa, e
+          # il lock di dpkg atteso invece di fallire subito.
+          sudo dpkg --configure -a || true
           sudo apt-get install -y -q --no-install-recommends -o Acquire::Retries=3 \
-            ./dist/converter_*_amd64.deb
+            -o DPkg::Lock::Timeout=300 ./dist/converter_*_amd64.deb
           test -x /usr/bin/converter
           desktop-file-validate /usr/share/applications/converter.desktop
           report="$RUNNER_TEMP/selftest-deb.txt"
