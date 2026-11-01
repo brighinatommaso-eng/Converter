@@ -1,11 +1,16 @@
 [Desktop Entry]
 Type=Application
 Name=Converter
+Name[it]=Converter
 GenericName=File Converter
+GenericName[it]=Convertitore di file
 Comment=Convert files offline, honest about quality
+Comment[it]=Converte i file in locale, con un verdetto onesto sulla qualità
 Exec=converter
 Icon=converter
 Terminal=false
 Categories=Utility;
 Keywords=convert;converter;pdf;docx;image;audio;video;3d;
+Keywords[it]=converti;conversione;pdf;docx;immagine;audio;video;3d;
 StartupWMClass=Converter
+StartupNotify=true

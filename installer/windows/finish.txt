@@ -1,0 +1,9 @@
+Converter is installed.
+
+Start it from the Start menu ("Converter"), or from the desktop shortcut if you
+created one. You can also pin it to the taskbar from there.
+
+Settings, presets and conversion history are stored in %APPDATA%\Converter. They
+belong to you: uninstalling the app leaves them untouched.
+
+Updates and support: https://github.com/brighinatommaso-eng/Converter

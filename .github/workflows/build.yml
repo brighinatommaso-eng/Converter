@@ -194,16 +194,66 @@ jobs:
           $v = "${{ steps.version.outputs.version }}"
           & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DAppVersion=$v" installer\converter.iss
           if ($LASTEXITCODE -ne 0) { throw "ISCC fallito" }
+          # Il setup espone le sue informazioni nelle Proprieta' del file: un
+          # installer professionale le dichiara (nome, versione, editore).
+          # Inno allunga i campi a passo fisso: il confronto e' sulle stringhe
+          # senza spazi.
+          $setupFile = Get-Item "dist\Converter-v$v-setup.exe"
+          $info = $setupFile.VersionInfo
+          if ($info.ProductVersion.Trim() -ne $v) { throw "ProductVersion del setup = '$($info.ProductVersion)', atteso '$v'" }
+          if ($info.CompanyName.Trim() -ne "Tommaso Brighina") { throw "CompanyName del setup mancante" }
+          if (-not $info.FileDescription.Trim()) { throw "FileDescription del setup mancante" }
 
-      - name: Installer round-trip (install, selftest, uninstall)
+      # Il setup viene provato come lo usa l'utente: collega nel menu Start,
+      # scelta della scorciatoia sul desktop, icona giusta (non quella generica
+      # di Windows), app che parte, disinstallazione pulita.
+      - name: Installer round-trip (shortcuts, icon, selftest, uninstall)
         run: |
           $v = "${{ steps.version.outputs.version }}"
           $dir = Join-Path $env:RUNNER_TEMP "ConverterInstalled"
+          # /TASKS esercita la scelta "scorciatoia sul desktop" del wizard.
           $setup = Start-Process "dist\Converter-v$v-setup.exe" -Wait -PassThru `
-            -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CURRENTUSER", "/DIR=`"$dir`""
+            -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CURRENTUSER", `
+                          "/TASKS=`"desktopicon`"", "/DIR=`"$dir`""
           if ($setup.ExitCode -ne 0) { throw "setup.exe uscito con $($setup.ExitCode)" }
+
+          # 1. Menu Start: il collegamento deve esserci e puntare all'app installata.
           $lnk = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\Converter.lnk"
           if (-not (Test-Path $lnk)) { throw "collegamento nel menu Start mancante" }
+          $shell = New-Object -ComObject WScript.Shell
+          $shortcut = $shell.CreateShortcut($lnk)
+          if (-not $shortcut.TargetPath.StartsWith($dir, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw "il collegamento nel menu Start punta a '$($shortcut.TargetPath)' invece di '$dir'"
+          }
+
+          # 2. Desktop: la scelta del wizard (attiva di default) deve crearlo.
+          $desktop = [Environment]::GetFolderPath("Desktop")
+          $desktopLnk = Join-Path $desktop "Converter.lnk"
+          if (-not (Test-Path $desktopLnk)) { throw "collegamento sul desktop mancante" }
+
+          # 3. Identita' dell'app: l'AppUserModelID registrato con la sua icona
+          #    e' quello che fa mostrare il logo di Converter nella taskbar
+          #    invece dell'icona generica di Windows.
+          $aumidKey = "HKCU:\Software\Classes\AppUserModelId\TommasoBrighina.Converter"
+          if (-not (Test-Path $aumidKey)) { throw "AppUserModelID non registrato dall'installer" }
+          $iconUri = (Get-ItemProperty $aumidKey).IconUri
+          if (-not $iconUri -or -not (Test-Path $iconUri)) { throw "IconUri non valido: '$iconUri'" }
+
+          # 4. Icona dell'eseguibile: deve essere quella di Converter, non
+          #    l'icona generica di Windows (che si vede finche' la cache delle
+          #    icone non si svuota).
+          Add-Type -AssemblyName System.Drawing
+          $exeIcon = [System.Drawing.Icon]::ExtractAssociatedIcon((Join-Path $dir "Converter.exe"))
+          if (-not $exeIcon) { throw "l'eseguibile installato non ha icona" }
+          $fromExe = $exeIcon.ToBitmap()
+          $fromIco = (New-Object System.Drawing.Icon((Join-Path $dir "_internal\assets\converter.ico"), 32, 32)).ToBitmap()
+          $different = 0
+          for ($y = 0; $y -lt 32; $y++) {
+            for ($x = 0; $x -lt 32; $x++) {
+              if ($fromExe.GetPixel($x, $y).ToArgb() -ne $fromIco.GetPixel($x, $y).ToArgb()) { $different++ }
+            }
+          }
+          if ($different -gt 102) { throw "l'icona dell'eseguibile non e' quella di Converter ($different pixel diversi su 1024)" }
 
           $report = Join-Path $env:RUNNER_TEMP "selftest-installed.txt"
           $p = Start-Process "$dir\Converter.exe" -ArgumentList "--selftest", "`"$report`"" -Wait -PassThru
@@ -217,7 +267,9 @@ jobs:
           # unins000.exe si rilancia da una copia temporanea: aspetta che finisca davvero.
           for ($i = 0; $i -lt 30 -and (Test-Path "$dir\Converter.exe"); $i++) { Start-Sleep 1 }
           if (Test-Path "$dir\Converter.exe") { throw "la disinstallazione ha lasciato Converter.exe" }
-          if (Test-Path $lnk) { throw "la disinstallazione ha lasciato il collegamento" }
+          if (Test-Path $lnk) { throw "la disinstallazione ha lasciato il collegamento nel menu Start" }
+          if (Test-Path $desktopLnk) { throw "la disinstallazione ha lasciato il collegamento sul desktop" }
+          if (Test-Path $aumidKey) { throw "la disinstallazione ha lasciato la registrazione dell'AppUserModelID" }
 
       - uses: actions/upload-artifact@v4
         with:
@@ -347,6 +399,22 @@ jobs:
             dist "$RUNNER_TEMP/appimagetool-x86_64.AppImage"
           ls -la dist
 
+      #Dentro l'AppImage la voce di menu deve puntare al launcher interno
+      # (AppRun): con un comando che nel PATH non esiste la voce non parte.
+      - name: AppImage contents (menu entry, metadata)
+        timeout-minutes: 10
+        run: |
+          image="dist/Converter-v${{ steps.version.outputs.version }}-x86_64.AppImage"
+          cd "$RUNNER_TEMP"
+          APPIMAGE_EXTRACT_AND_RUN=1 "$OLDPWD/$image" --appimage-extract > /dev/null
+          test -f squashfs-root/converter.desktop || { echo "::error::manca il desktop file nell'AppImage"; exit 1; }
+          grep -q '^Exec=AppRun$' squashfs-root/converter.desktop || {
+            echo "::error::la voce di menu dell'AppImage non punta ad AppRun"; exit 1; }
+          test -f squashfs-root/usr/share/metainfo/converter.metainfo.xml || {
+            echo "::error::manca metainfo nell'AppImage"; exit 1; }
+          test -f squashfs-root/usr/lib/converter/LICENSE || {
+            echo "::error::manca la licenza nell'AppImage"; exit 1; }
+
       - name: AppImage selftest (Ubuntu)
         run: |
           report="$RUNNER_TEMP/selftest-appimage.txt"
@@ -386,6 +454,8 @@ jobs:
             -o DPkg::Lock::Timeout=300 ./dist/converter_*_amd64.deb
           test -x /usr/bin/converter
           desktop-file-validate /usr/share/applications/converter.desktop
+          test -f /usr/share/metainfo/converter.metainfo.xml || {
+            echo "::error::mancano i metadati AppStream nel pacchetto"; exit 1; }
           report="$RUNNER_TEMP/selftest-deb.txt"
           converter --selftest "$report" || true
           cat "$report"

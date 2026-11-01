@@ -4,9 +4,9 @@ A complete picture of the app: what it is, how it's built, the principles and co
 the work done so far, the bugs solved, and my (the owner's) working preferences. Written so a
 future session can pick up with full context without re-deriving everything.
 
-- **App:** Converter `0.1.5` — *"Convert files locally — honest about quality."*
+- **App:** Converter `0.1.6` — *"Convert files locally — honest about quality."*
 - **Stack:** Python 3.13 + PySide6 (Qt6), offline desktop app, Windows-first.
-- **Last updated:** 2026-10-26.
+- **Last updated:** 2026-11-01.
 - **Note on authorship:** §§1–13 document how the application is built (reference, derived
   from the codebase). §14 onward is the work done in recent sessions (GUI redesign
   integration + bug fixes, the docx/odt→html routing change, the PDF import converter with

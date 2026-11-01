@@ -1,0 +1,10 @@
+Converter turns images, audio, video, data, documents and 3D models into other
+formats - entirely on this computer. Nothing is uploaded, no account is needed,
+and the app works offline.
+
+Before it converts anything, it tells you whether the result will be lossless or
+lossy, and why. Quality is never promised silently.
+
+The app is installed for your user only (no administrator rights needed). It
+appears in the Start menu, and you can also put a shortcut on the desktop on the
+next page.

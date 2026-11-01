@@ -51,6 +51,11 @@ def _load_fonts() -> str | None:
 
 _ICON_SIZES = (16, 20, 24, 32, 40, 48, 64, 96, 128, 256)
 
+# Identità dell'app su Windows (taskbar, menu Start, notifiche). Deve combaciare
+# con installer/converter.iss (#define AppUserModelID): l'installer registra
+# questo ID con la sua icona, così Windows non deve indovinare.
+_APP_USER_MODEL_ID = "TommasoBrighina.Converter"
+
 
 def _app_icon() -> QIcon:
     """Icona dell'app costruita da PNG in più dimensioni (assets/icons).
@@ -78,12 +83,18 @@ def _app_icon() -> QIcon:
 def _set_windows_app_id() -> None:
     """Windows: senza un AppUserModelID esplicito la taskbar mostra l'icona
     generica di Python invece della nostra. Va impostato PRIMA di mostrare la
-    finestra."""
+    finestra.
+
+    L'identità DEVE combaciare con quella che l'installer registra nel registro
+    (installer/converter.iss, #define AppUserModelID): è quella registrazione
+    che dice a Windows "questo ID è questa icona". Se i due divergono, la
+    taskbar ricade sull'icona generica finché la cache delle icone non si
+    svuota (in pratica: serve un riavvio)."""
     if sys.platform == "win32":
         try:
             import ctypes
 
-            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("Converter.App")
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(_APP_USER_MODEL_ID)
         except Exception:  # pragma: no cover - non deve mai bloccare l'avvio
             pass
 

@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Metadati AppStream: e' cio' che i negozi di software (GNOME Software, KDE
+  Discover, Plasma) leggono per mostrare Converter con nome, descrizione,
+  icona, licenza e versione. La versione e la data sono dei segnaposto:
+  sostituiti dagli script di build (vedi build-deb.sh e build-appimage.sh).
+-->
+<component type="desktop-application">
+  <id>converter.desktop</id>
+  <metadata_license>MIT</metadata_license>
+  <project_license>MIT</project_license>
+  <name>Converter</name>
+  <summary>Convert files offline, honest about quality</summary>
+  <description>
+    <p>
+      Converter converts images, audio, video, data, documents and 3D models
+      entirely on your computer: nothing is uploaded and no account is needed.
+    </p>
+    <p>
+      Before converting, it tells you whether the result is lossless or lossy,
+      and why. Quality is never promised silently.
+    </p>
+  </description>
+  <launchable type="desktop-id">converter.desktop</launchable>
+  <url type="homepage">https://github.com/brighinatommaso-eng/Converter</url>
+  <url type="bugtracker">https://github.com/brighinatommaso-eng/Converter/issues</url>
+  <developer_name>Tommaso Brighina</developer_name>
+  <provides>
+    <binary>converter</binary>
+  </provides>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="@VERSION@" date="@DATE@"/>
+  </releases>
+</component>

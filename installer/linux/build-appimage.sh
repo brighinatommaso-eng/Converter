@@ -18,11 +18,26 @@ work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 appdir="$work/Converter.AppDir"
 
-install -d "$appdir/usr/lib/converter" "$appdir/usr/share/applications"
+install -d "$appdir/usr/lib/converter" "$appdir/usr/share/applications" "$appdir/usr/share/metainfo"
 cp -a "$dist/." "$appdir/usr/lib/converter/"
 install -m 755 "$here/AppRun" "$appdir/AppRun"
-install -m 644 "$here/converter.desktop" "$appdir/converter.desktop"
-install -m 644 "$here/converter.desktop" "$appdir/usr/share/applications/converter.desktop"
+
+# Nel menu di un AppImage il comando e' il launcher interno (AppRun), non il
+# wrapper /usr/bin/converter che esiste solo nel pacchetto .deb: con quello la
+# voce di menu non parte (il comando non e' nel PATH).
+sed 's|^Exec=.*|Exec=AppRun|' "$here/converter.desktop" > "$appdir/converter.desktop"
+grep -q '^Exec=AppRun$' "$appdir/converter.desktop" || {
+  echo "il desktop file dell'AppImage non punta ad AppRun" >&2; exit 1; }
+install -m 644 "$appdir/converter.desktop" "$appdir/usr/share/applications/converter.desktop"
+if command -v desktop-file-validate >/dev/null 2>&1; then
+  desktop-file-validate "$appdir/converter.desktop"
+fi
+
+# Metadati AppStream: i negozi di software leggono qui nome, descrizione,
+# licenza, icona e versione dell'app.
+sed -e "s/@VERSION@/$version/g" -e "s/@DATE@/$(date -u +%Y-%m-%d)/g" \
+  "$here/metainfo.xml.in" > "$appdir/usr/share/metainfo/converter.metainfo.xml"
+
 install -m 644 "$repo/converter/assets/icons/converter_256.png" "$appdir/converter.png"
 for n in 16 24 32 48 64 128 256; do
   install -D -m 644 "$repo/converter/assets/icons/converter_$n.png" \

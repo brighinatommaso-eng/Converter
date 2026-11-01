@@ -230,3 +230,7 @@ for _src in _bundled_tools:
 shutil.copytree("licenses", os.path.join(_dist_root, "licenses"), dirs_exist_ok=True)
 for _doc in ("LICENSE", "THIRD_PARTY_NOTICES.md"):
     shutil.copy2(_doc, os.path.join(_dist_root, _doc))
+# La versione portabile (zip) va anche a chi non installa: un README accanto
+# all'eseguibile spiega che la cartella _internal non si sposta e dove finiscono
+# i dati dell'utente.
+shutil.copy2("installer/windows/PORTABLE_README.txt", os.path.join(_dist_root, "README.txt"))

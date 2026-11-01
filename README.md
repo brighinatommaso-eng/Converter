@@ -10,7 +10,9 @@ tells you whether the conversion is lossless or lossy.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-![Converter screenshot](docs/screenshot.png)
+![Converter screenshot](docs/assets/screenshot.png)
+
+![Converter demo](docs/assets/converter-demo.gif)
 
 ## Features
 
@@ -67,10 +69,10 @@ Grab the latest release from the
 **[Releases page](https://github.com/brighinatommaso-eng/Converter/releases)**.
 Two downloads, same app:
 
-- **`Converter-vX.Y.Z-setup.exe`** (installer): run it and follow the steps. It adds
-  Converter to the Start menu (and optionally the desktop) and can be removed from
-  *Settings → Apps*. By default it installs for your user only, so it needs no
-  administrator rights. Updating means running the new installer over the old one.
+- **`Converter-vX.Y.Z-setup.exe`** (installer): run it and follow the steps. It installs
+  for your user only (no administrator rights needed), adds **Converter** to the Start
+  menu and offers a **desktop shortcut** you can keep or remove. It can be removed from
+  *Settings → Apps*. Updating means running the new installer over the old one.
 - **`Converter-vX.Y.Z-windows.zip`** (portable): **extract the whole zip** to a
   folder (don't run it from inside the archive) and run **`Converter.exe`**. You
   should see it next to an `_internal` folder.

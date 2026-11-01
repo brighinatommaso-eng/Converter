@@ -18,7 +18,8 @@ root="$(mktemp -d)"
 trap 'rm -rf "$root"' EXIT
 
 install -d "$root/DEBIAN" "$root/opt/converter" "$root/usr/bin" \
-           "$root/usr/share/applications" "$root/usr/share/doc/converter"
+           "$root/usr/share/applications" "$root/usr/share/doc/converter" \
+           "$root/usr/share/metainfo"
 cp -a "$dist/." "$root/opt/converter/"
 
 # Lanciatore: uno script e non un symlink, così l'eseguibile PyInstaller trova
@@ -36,9 +37,29 @@ done
 install -m 644 "$repo/LICENSE" "$root/usr/share/doc/converter/copyright"
 install -m 644 "$repo/THIRD_PARTY_NOTICES.md" "$root/usr/share/doc/converter/THIRD_PARTY_NOTICES.md"
 
+# Metadati AppStream: e' cio' che i negozi di software (GNOME Software, KDE
+# Discover, Plasma) leggono per presentare Converter con nome, descrizione,
+# licenza, icona e versione.
+sed -e "s/@VERSION@/$version/g" -e "s/@DATE@/$(date -u +%Y-%m-%d)/g" \
+  "$here/metainfo.xml.in" > "$root/usr/share/metainfo/converter.metainfo.xml"
+
+# Changelog nel formato dei pacchetti Debian (convenzione, non obbligo).
+cat > "$root/usr/share/doc/converter/changelog.Debian" <<EOF
+converter ($version) stable; urgency=medium
+
+  * Release $version.
+
+ -- Tommaso Brighina <brighinatommaso-eng@users.noreply.github.com>  $(date -u -R)
+EOF
+gzip -9n "$root/usr/share/doc/converter/changelog.Debian"
+
 # Permessi standard: cartelle 755, file 644, eseguibili restano eseguibili.
 chmod -R u=rwX,go=rX "$root"
 chmod 755 "$root/usr/bin/converter" "$root/opt/converter/Converter"
+
+# Checksum dei file installati (convenzione Debian).
+(cd "$root" && find . -type f ! -path './DEBIAN/*' -printf '%P\0' | sort -z |
+  xargs -0 -r md5sum > DEBIAN/md5sums)
 
 installed_kb="$(du -sk --exclude=DEBIAN "$root" | cut -f1)"
 cat > "$root/DEBIAN/control" <<CTRL
