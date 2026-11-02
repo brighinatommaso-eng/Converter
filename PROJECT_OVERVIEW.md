@@ -904,3 +904,50 @@ without error; before, 2 crashed on control characters. Remaining gaps:
 clipped (white over the chunk, dark over the track). It replaced one grey label that
 the blue chunk hid.
 
+## 29. Release 0.1.6: l'app come la cerca l'utente (2026-11-02)
+
+**Installer Windows** (`installer/converter.iss`). Il setup ora fa cio' che fa un'app
+a pagamento: voce nel **menu Start sempre**, scorciatoia sul **desktop come scelta
+visibile** del wizard (attiva di default: in Inno 6 un task senza `Flags: unchecked`
+e' gia' selezionato, il flag `checked` non esiste), pagine di benvenuto/fine,
+licenza, `VersionInfo*` nelle proprieta' del file, minimo Windows 10, riavvio
+dell'app dopo un aggiornamento (`CloseApplications`/`RestartApplications`).
+L'**AppUserModelID** (`TommasoBrighina.Converter`) e' dichiarato dall'app
+(`gui/app._set_windows_app_id`) **e** registrato dall'installer in
+`HKCU/HKLM\Software\Classes\AppUserModelId` con `IconUri`: i due valori devono
+combaciare, altrimenti Windows non sa a che icona associare l'app e la taskbar
+mostra l'icona generica. Dopo l'installazione il setup rinfresca la cache delle
+icone (`ie4uinit.exe -show`): senza, Explorer continua a mostrare l'icona del
+vecchio eseguibile fino al riavvio.
+
+**Icona.** `converter.ico` aveva tutti i frame in PNG-compresso: Explorer li legge,
+**GDI+ no** (`System.Drawing` ricavava rumore, verificato: 1024 pixel diversi su
+1024). Ora `installer/tools/make-ico.py` scrive i frame ≤128 in **DIB classico** e
+copia il 256 **byte per byte** dalla PNG sorgente (ricodificare un PNG dà byte
+diversi da piattaforma a piattaforma: il test di packaging falliva solo su Linux).
+
+**Pacchetti Linux.** La voce di menu dell'AppImage puntava a `converter`, che esiste
+solo nel `.deb`: ora punta ad `AppRun`. Entrambi i pacchetti portano i metadati
+AppStream (`installer/linux/metainfo.xml.in`), il `.deb` anche changelog Debian e
+md5sums, e la voce di menu e' tradotta.
+
+**CI.** Il setup viene provato come lo usa l'utente (menu Start, desktop, icona
+confrontata pixel per pixel, identita' registrata, selftest, disinstallazione
+senza residui); l'AppImage viene aperto e controllato; 8 test di packaging nuovi.
+
+**Il modello che non blocca la macchina.** La CI Linux si e' bloccata: 30 minuti
+di log muto, poi un hang. Causa: **ONNX Runtime con i suoi default** lancia un
+thread per core e, quando non lavora, quel thread **gira a vuoto** (spin). Su una
+macchina con molti core visibili e CPU limitata la conversione PDF->Word sembrava
+bloccata (in CI il segmento coi test del modello: ~33 s -> ~16 minuti, poi hang).
+Ora la sessione ha `intra_op ≤ 4`, `inter_op = 1` e spin disattivato: in CI il
+segmento è tornato a **~5 s** e la suite intera a 32 s. Vale anche per l'utente:
+senza, un portatile da 2 core con 4 conversioni in parallelo si impiccia.
+
+**Diagnostica CI.** `pytest --timeout=600 --durations=20`: un test bloccato fallisce
+subito dicendo quale e' (prima mangiava i 30 minuti del job in silenzio), e il log
+mostra dove va il tempo.
+
+**Docs.** Foto e video sotto `docs/assets/` (demo `.gif` incluso), `docs/README.md`
+con la struttura, riferimenti ai file spostati corretti.
+
