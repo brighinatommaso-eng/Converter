@@ -70,12 +70,15 @@ def dib_frame(image: Image.Image) -> bytes:
     return header + bytes(xor) + bytes(and_mask)
 
 
-def png_frame(image: Image.Image) -> bytes:
-    from io import BytesIO
+def png_frame(path: Path) -> bytes:
+    """Frame PNG: il file sorgente copiato byte per byte.
 
-    buffer = BytesIO()
-    image.convert("RGBA").save(buffer, format="PNG")
-    return buffer.getvalue()
+    Non lo si ricodifica con Pillow: lo stesso PNG ricodificato dà byte
+    diversi da macchina a macchina (zlib e versione di Pillow cambiano il
+    flusso dei filtri). Il .ico deve invece essere identico ovunque: e' quello
+    che il test di packaging confronta con il file committato.
+    """
+    return path.read_bytes()
 
 
 def build_ico() -> bytes:
@@ -85,7 +88,7 @@ def build_ico() -> bytes:
         if not source.is_file():
             raise SystemExit(f"manca l'icona sorgente: {source}")
         image = Image.open(source)
-        payload = dib_frame(image) if kind == "bmp" else png_frame(image)
+        payload = dib_frame(image) if kind == "bmp" else png_frame(source)
         entries.append((image.width, image.height, payload))
 
     offset = 6 + 16 * len(entries)

@@ -328,3 +328,16 @@ def test_parallel_conversions_share_the_model_safely(two_column_pdf):
     for thread in threads:
         thread.join()
     assert not errors and len(results) == 3 and len(set(results)) == 1
+
+
+@_needs_model
+def test_the_model_session_does_not_explode_into_threads():
+    """Senza limiti, onnxruntime lancia un thread per core e i thread che non
+    lavorano girano a vuoto: su una macchina piccola (o su un runner CI) la
+    conversione si blocca per minuti sembrando un hang."""
+    analyzer = layout_ai.get_analyzer()
+    assert analyzer is not None, "il modello dovrebbe essere disponibile"
+    options = analyzer.session.get_session_options()
+    assert 1 <= options.intra_op_num_threads <= layout_ai._MAX_INTRA_OP_THREADS
+    assert options.inter_op_num_threads == 1
+    assert options.get_session_config_entry("session.intra_op.allow_spinning") == "0"

@@ -39,6 +39,14 @@ _RENDER_LONG_SIDE = 1100    # lato lungo della pagina renderizzata per il modell
 _CROP_DPI = 200             # risoluzione dei ritagli (figure, formule)
 _MIN_SCORE = 0.5
 
+# Limite dei thread per sessione ONNX. Il modello e' piccolo (800x800) e la GUI
+# converte piu' file in parallelo: senza un limite onnxruntime lancia un thread
+# per core e, quando non lavora, quel thread gira a vuoto (spin) rubando CPU
+# alle conversioni vere. Su una macchina con pochi core (un portatile da 2, un
+# runner CI) il risultato e' una conversione che sembra bloccata per minuti.
+# Limiti stretti = tempo prevedibile.
+_MAX_INTRA_OP_THREADS = 4
+
 # PDFium NON è thread-safe (nemmeno tra documenti diversi) e la GUI converte in
 # parallelo: ogni chiamata a pypdfium2 passa da questo lock. onnxruntime invece
 # accetta run() concorrenti sulla stessa sessione.
@@ -133,6 +141,11 @@ class LayoutAnalyzer:
 
         options = ort.SessionOptions()
         options.log_severity_level = 3
+        # Thread limitati e spin disattivato: vedi _MAX_INTRA_OP_THREADS.
+        options.intra_op_num_threads = max(1, min(_MAX_INTRA_OP_THREADS, os.cpu_count() or 1))
+        options.inter_op_num_threads = 1
+        options.add_session_config_entry("session.intra_op.allow_spinning", "0")
+        options.add_session_config_entry("session.inter_op.allow_spinning", "0")
         self.session = ort.InferenceSession(str(model_path), options,
                                             providers=["CPUExecutionProvider"])
         labels = self.session.get_modelmeta().custom_metadata_map.get("character", "")

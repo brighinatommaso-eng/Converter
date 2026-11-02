@@ -45,7 +45,7 @@ jobs:
           sudo apt-get install -y -q --no-install-recommends \
             ffmpeg libreoffice-writer fonts-dejavu-core fonts-crosextra-carlito \
             libegl1 libgl1 libxkbcommon0 libxkbcommon-x11-0 libfontconfig1 libdbus-1-3
-      - run: pip install -r requirements.txt "pytest>=8.0" "ruff>=0.6" "lxml>=5"
+      - run: pip install -r requirements.txt "pytest>=8.0" "ruff>=0.6" "lxml>=5" "pytest-timeout>=2.3"
       # Il modello AI di layout (214 MB, hash fisso) fa girare anche i test
       # end-to-end di tests/test_layout_ai.py; in cache dopo il primo download.
       - uses: actions/cache@v4
@@ -59,7 +59,11 @@ jobs:
           QT_QPA_PLATFORM: offscreen
         # -rs elenca i test saltati: una corsa verde che salta audio/video/documenti
         # non dimostra nulla, il riepilogo lo rende visibile nel log.
-        run: python -m pytest -q -rs
+        # --timeout: un test bloccato (thread di onnxruntime, LibreOffice bloccato)
+        # deve fallire subito dicendo QUALE test e' fermo, non mangiare i 30
+        # minuti del job con un log muto.
+        # --durations: i test piu' lenti in coda al log (dove va il tempo).
+        run: python -m pytest -q -rs --durations=20 --timeout=600
 
   test-windows:
     runs-on: windows-latest
@@ -71,8 +75,10 @@ jobs:
           python-version: "3.13"
           cache: pip
           cache-dependency-path: requirements.txt
-      - run: pip install -r requirements.txt "pytest>=8.0" "ruff>=0.6" "lxml>=5"
+      - run: pip install -r requirements.txt "pytest>=8.0" "ruff>=0.6" "lxml>=5" "pytest-timeout>=2.3"
       - name: Tests
         env:
           QT_QPA_PLATFORM: offscreen
-        run: python -m pytest -q -rs
+        # --timeout: su Windows un test bloccato viene diagnosticato (stack di
+        # tutti i thread) e il job fallisce subito invece di scadere muto.
+        run: python -m pytest -q -rs --durations=20 --timeout=600
